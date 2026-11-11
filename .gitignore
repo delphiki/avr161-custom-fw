@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv*/
+venvcap/
+venvpg/
+
+# macOS
+.DS_Store
+
+# Ghidra locks/temp (le projet .rep/.gpr est versionné, pas ses verrous)
+*.lock
+*.lock~
+*.rep/*.lock
+*~
+
+# Build outputs du patch (régénérables)
+firmware/patches/out/
