@@ -53,12 +53,34 @@ MENU_OPEN_DELAY = 3.0   # temps d'ouverture du menu puis de la liste
 MENU_STEP_DELAY = 1.0   # pause entre deux touches : plus vite, l'ampli en perd
 
 # Commandes brutes connues (nom envoyé dans <name>), issues de CommandSetAvr.
+# get-status / set-volume ne sont dispo qu'avec le firmware CUSTOM (patch #1).
 RAW_COMMANDS = ["power-on", "power-off", "power-toggle", "sleep",
                 "volume-up", "volume-down", "mute-toggle", "mute-on", "mute-off",
                 "play", "pause", "next", "previous", "forward", "reverse",
                 "tune-up", "tune-down", "tone", "info", "options",
                 "home", "ok", "back", "up", "down", "left", "right",
-                "source-selection", "heart-alive", "bye-bye"]
+                "source-selection", "heart-alive", "bye-bye",
+                "get-status", "set-volume"]
+
+# Enum de source renvoyé par get-status (firmware custom) -> nom lisible.
+SOURCE_ENUM = {0x0B: "iPod", 0x0C: "Home Network", 0x0D: "vTuner",
+               0x10: "USB", 0x11: "Bluetooth"}
+
+
+def parse_status(para):
+    """Parse le `para` de get-status ('vol,mute,src') -> dict {vol,mute,source}."""
+    vol, mute, src = (para.split(",") + ["", "", ""])[:3]
+    return {"vol": int(vol), "mute": bool(int(mute)),
+            "source": SOURCE_ENUM.get(int(src), str(int(src)))}
+
+
+# Échelle volume interne 0..180 (~0,5 dB/pas) <-> dB (-80..+10 dB, 0 dB à l'index 160).
+def internal_to_db(n):
+    return round(-80.0 + 0.5 * n, 1)
+
+
+def db_to_internal(db):
+    return int(round((db + 80.0) * 2))
 
 
 def _request(name, para=""):
@@ -107,6 +129,21 @@ class Ampli:
             time.sleep(MENU_STEP_DELAY - STEP_DELAY)
         self.send("ok")
 
+    def get_status(self):
+        """Interroge get-status (firmware custom) -> dict {vol,mute,source} ou None."""
+        import re
+        for _ in range(6):
+            self.sock.sendall(_request("get-status"))
+            self.sock.settimeout(1.5)
+            try:
+                r = self.sock.recv(8192)
+            except socket.timeout:
+                continue
+            m = re.search(rb"<para>([^<]*)</para>", r)
+            if b"get-status" in r and m and b"," in m.group(1):
+                return parse_status(m.group(1).decode())
+        return None
+
     def close(self):
         self.sock.close()
 
@@ -141,13 +178,29 @@ def main(argv):
                 amp.send("mute-off")
             else:
                 amp.send("mute-toggle")
+        elif cmd == "status":
+            st = amp.get_status()
+            if st is None:
+                print("get-status sans réponse (nécessite le firmware custom).", file=sys.stderr)
+                return 1
+            print(f"volume {st['vol']} ({internal_to_db(st['vol']):+.1f} dB) | "
+                  f"mute {'on' if st['mute'] else 'off'} | source {st['source']}")
+        elif cmd in ("set-volume", "setvol"):
+            if not args:
+                print("Usage : ampli.py set-volume <0-180 | NdB>  (firmware custom)", file=sys.stderr)
+                return 2
+            a = args[0].lower()
+            n = db_to_internal(float(a[:-2])) if a.endswith("db") else int(a)
+            amp.send("set-volume", str(max(0, min(180, n))))
         elif cmd == "source":
             if not args:
-                print("Sources directes : " + ", ".join(SOURCES + ["MHL"]), file=sys.stderr)
-                print("Via le menu (~10 s) : " + ", ".join(MENU_SOURCES), file=sys.stderr)
+                print("Sources directes : " + ", ".join(SOURCES + ["MHL", "Bluetooth"]), file=sys.stderr)
                 return 2
             wanted = " ".join(args)
-            if wanted.lower() in MENU_SOURCES:
+            if wanted.lower() == "bluetooth":
+                # commande directe (firmware custom patch #1) ; fallback menu : select_menu_source(14)
+                amp.send("source-selection", "Bluetooth")
+            elif wanted.lower() in MENU_SOURCES:
                 amp.select_menu_source(MENU_SOURCES[wanted.lower()])
             else:
                 wanted = ALIASES.get(wanted.lower(), wanted)
