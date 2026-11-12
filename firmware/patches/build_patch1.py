@@ -55,11 +55,16 @@ A_NETBUF     = 0x2000a0b4          # buffer HTTP sortant
 A_VOL        = 0x2000e1b8          # volume live (u8 0..180)
 A_MUTE       = 0x2000de40          # flags ; mute = bit1
 A_SRC        = 0x2000e1ae          # source enum (u8)
+F_VOLUP      = 0x0801b568          # vol_up()  (incrémente+applique 0x2000e1b8)
+F_VOLDOWN    = 0x0801b8f0          # vol_down()
+VOL_MAX      = 180                 # 0..0xB4
 
 # --- layout du cave (zone réécrite 0x080E0000) ---
 STR_GETSTATUS = CAVE_VA + 0x000    # "get-status\0"
 STR_COMMA     = CAVE_VA + 0x010    # ",\0"
+STR_SETVOL    = CAVE_VA + 0x018    # "set-volume\0"
 EMIT_STATUS   = CAVE_VA + 0x040    # routine emit_status
+SET_VOLUME    = CAVE_VA + 0x280    # routine set_volume
 CAVE_DISPATCH = CAVE_VA + 0x180    # entrée depuis le trampoline
 
 
@@ -105,21 +110,81 @@ def _emit_status_src():
     )
 
 
-def _cave_dispatch_part1():
-    # r0 = param_1 (name ptr) ; lr = retour vers l'appelant de cmd_dispatch (détour avant son push)
+def _set_volume_src():
+    # r0 = struct (para @ +0x40). Règle 0x2000e1b8 vers la cible en réutilisant vol_up/vol_down.
     return (
-        "push {r0, r4, lr}\n"
-        "mov r4, r0\n"
-        "mov r0, r4\n"
-        + _mw("r1", STR_GETSTATUS) + f"bl #{F_STRCMP}\n"
-        "cmp r0, #0\n"
-        "bne not_gs\n"
-        "mov r0, r4\n"
-        f"bl #{EMIT_STATUS}\n"
-        "pop {r0, r4, pc}\n"                 # get-status traité -> retour appelant
-        "not_gs:\n"
-        "pop {r0, r4, lr}\n"                 # pas pour nous -> restaurer, exécuter prologue déplacé
+        "push {r4,r5,r6,r7,lr}\n"
+        "add r4, r0, #0x40\n"                # r4 = para (chaîne décimale)
+        # --- atoi(para) -> r5 ---
+        "movs r5, #0\n"
+        "atoi_loop:\n"
+        "ldrb r6, [r4]\n"
+        "subs r6, r6, #0x30\n"               # c - '0'
+        "cmp r6, #9\n"
+        "bhi atoi_done\n"                    # non-chiffre (unsigned > 9) -> fin
+        "movs r7, #10\n"
+        "muls r5, r7, r5\n"                  # r5 = r5*10
+        "adds r5, r5, r6\n"
+        "adds r4, r4, #1\n"
+        "b atoi_loop\n"
+        "atoi_done:\n"
+        # --- clamp r5 à [0, VOL_MAX] ---
+        f"cmp r5, #{VOL_MAX}\n"
+        "bls clamp_ok\n"
+        f"movs r5, #{VOL_MAX}\n"
+        "clamp_ok:\n"
+        # --- boucle d'ajustement (bornée 128) ---
+        "movs r7, #0\n"                      # r7 = compteur
+        "sv_loop:\n"
+        "cmp r7, #128\n"
+        "bhs sv_end\n"
+        + _mw("r0", A_VOL) + "ldrb r6, [r0]\n"   # r6 = cur
+        "cmp r6, r5\n"
+        "beq sv_end\n"                       # cible atteinte
+        "bhi go_down\n"                      # cur > cible -> down
+        f"bl #{F_VOLUP}\n"
+        "b after_step\n"
+        "go_down:\n"
+        f"bl #{F_VOLDOWN}\n"
+        "after_step:\n"
+        + _mw("r0", A_VOL) + "ldrb r0, [r0]\n"   # r0 = nouv
+        "cmp r0, r6\n"
+        "beq sv_end\n"                       # pas de progrès (garde bloquante) -> stop
+        # croisement : was_below(r6<r5) != now_below(r0<r5) -> stop
+        "movs r1, #0\n"
+        "cmp r6, r5\n"
+        "bhs wb0\n"
+        "movs r1, #1\n"
+        "wb0:\n"
+        "movs r2, #0\n"
+        "cmp r0, r5\n"
+        "bhs nb0\n"
+        "movs r2, #1\n"
+        "nb0:\n"
+        "cmp r1, r2\n"
+        "bne sv_end\n"                       # croisement/overshoot -> stop
+        "adds r7, r7, #1\n"
+        "b sv_loop\n"
+        "sv_end:\n"
+        "pop {r4,r5,r6,r7,pc}\n"
     )
+
+
+def _cave_dispatch_part1(features):
+    # r0 = param_1 (name ptr) ; lr = retour vers l'appelant de cmd_dispatch (détour avant son push)
+    s = "push {r0, r4, lr}\nmov r4, r0\n"
+    if "getstatus" in features:
+        s += ("mov r0, r4\n" + _mw("r1", STR_GETSTATUS) + f"bl #{F_STRCMP}\n"
+              "cmp r0, #0\nbne not_gs\n"
+              f"mov r0, r4\nbl #{EMIT_STATUS}\npop {{r0, r4, pc}}\n"
+              "not_gs:\n")
+    if "setvolume" in features:
+        s += ("mov r0, r4\n" + _mw("r1", STR_SETVOL) + f"bl #{F_STRCMP}\n"
+              "cmp r0, #0\nbne not_sv\n"
+              f"mov r0, r4\nbl #{SET_VOLUME}\npop {{r0, r4, pc}}\n"
+              "not_sv:\n")
+    s += "pop {r0, r4, lr}\n"                 # pas pour nous -> restaurer, exécuter prologue déplacé
+    return s
 
 
 def build_patch1(img, features=frozenset()):
@@ -131,9 +196,13 @@ def build_patch1(img, features=frozenset()):
         patchlib.write_bytes(img, va_to_off(STR_COMMA), b",\x00")
         emit = patchlib.asm_thumb(_emit_status_src(), EMIT_STATUS)
         patchlib.write_bytes(img, va_to_off(EMIT_STATUS), emit)
+    if "setvolume" in features:
+        patchlib.write_bytes(img, va_to_off(STR_SETVOL), b"set-volume\x00")
+        sv = patchlib.asm_thumb(_set_volume_src(), SET_VOLUME)
+        patchlib.write_bytes(img, va_to_off(SET_VOLUME), sv)
     if needs_dispatch:
         displaced = patchlib.detour(img, CMD_DISPATCH, CAVE_DISPATCH)
-        part1 = patchlib.asm_thumb(_cave_dispatch_part1(), CAVE_DISPATCH)
+        part1 = patchlib.asm_thumb(_cave_dispatch_part1(features), CAVE_DISPATCH)
         cont_va = CAVE_DISPATCH + len(part1) + len(displaced)
         bw = patchlib.asm_thumb(f"b.w #{CMD_DISPATCH + len(displaced)}", cont_va)
         blob = part1 + displaced + bw
