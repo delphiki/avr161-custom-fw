@@ -68,10 +68,13 @@ SOURCE_ENUM = {0x0B: "iPod", 0x0C: "Home Network", 0x0D: "vTuner",
 
 
 def parse_status(para):
-    """Parse le `para` de get-status ('vol,mute,src') -> dict {vol,mute,source}."""
-    vol, mute, src = (para.split(",") + ["", "", ""])[:3]
-    return {"vol": int(vol), "mute": bool(int(mute)),
-            "source": SOURCE_ENUM.get(int(src), str(int(src)))}
+    """Parse le `para` de get-status ('vol,mute,src[,fw]') -> dict {vol,mute,source[,fw]}."""
+    vol, mute, src, fw = (para.split(",") + ["", "", "", ""])[:4]
+    d = {"vol": int(vol), "mute": bool(int(mute)),
+         "source": SOURCE_ENUM.get(int(src), str(int(src)))}
+    if fw:
+        d["fw"] = fw          # version du firmware custom (patch >= v1.0.0)
+    return d
 
 
 # Échelle volume interne 0..180 (~0,5 dB/pas) <-> dB (-80..+10 dB, 0 dB à l'index 160).
@@ -198,8 +201,20 @@ def main(argv):
             if st is None:
                 print("get-status sans réponse (nécessite le firmware custom).", file=sys.stderr)
                 return 1
-            print(f"volume {st['vol']} ({internal_to_db(st['vol']):+.1f} dB) | "
-                  f"mute {'on' if st['mute'] else 'off'} | source {st['source']}")
+            line = (f"volume {st['vol']} ({internal_to_db(st['vol']):+.1f} dB) | "
+                    f"mute {'on' if st['mute'] else 'off'} | source {st['source']}")
+            if "fw" in st:
+                line += f" | fw {st['fw']}"
+            print(line)
+        elif cmd == "version":
+            st = amp.get_status()
+            if st and "fw" in st:
+                print(f"firmware custom v{st['fw']}")
+            elif st:
+                print("firmware stock (pas de version custom).")
+            else:
+                print("ampli injoignable / get-status sans réponse.", file=sys.stderr)
+                return 1
         elif cmd in ("set-volume", "setvol"):
             if not args:
                 print("Usage : ampli.py set-volume <0-180 | NdB>  (nécessite get-status)", file=sys.stderr)

@@ -3,6 +3,10 @@ import patchlib
 
 CAVE_VA = 0x080E0000  # base du code-cave (zone réécrite, 128 Ko de 0xFF)
 
+# Version du firmware CUSTOM (indépendante du stock V002.20). Source unique de vérité :
+# embarquée dans le firmware (4e champ de get-status) + nom de l'artefact + tag de release.
+FW_VERSION = "1.0.0"
+
 # --- Test A : patch cosmétique d'un nom de source OSD (preuve de récupération USB) ---
 SRCNAME_OFF = 0xd9904            # flash 0x080d9904 : "USB" dans la table d'affichage source (0x8053684)
 SRCNAME_LEN = 16                 # largeur fixe OSD
@@ -69,6 +73,7 @@ STR_COMMA     = CAVE_VA + 0x010    # ",\0"
 STR_SETVOL    = CAVE_VA + 0x018    # "set-volume\0"
 STR_SOURCESEL = CAVE_VA + 0x020    # "source-selection\0"
 STR_BLUETOOTH = CAVE_VA + 0x032    # "Bluetooth\0"
+STR_FWVER     = CAVE_VA + 0x3c0    # version custom (ex. "1.0.0\0") — 4e champ de get-status
 EMIT_STATUS   = CAVE_VA + 0x040    # routine emit_status
 SET_VOLUME    = CAVE_VA + 0x280    # routine set_volume
 BT_HANDLER    = CAVE_VA + 0x340    # routine bascule Bluetooth
@@ -106,6 +111,8 @@ def _emit_status_src():
         + app_str(STR_COMMA)
         # src
         + _mw("r0", A_SRC) + "ldrb r0, [r0]\n" + app_dec()
+        # ,<version firmware custom>  (4e champ)
+        + app_str(STR_COMMA) + app_str(STR_FWVER)
         # build_reply(name=get-status, zone=struct+0x20, para=PARA_BUF)
         + _mw("r0", STR_GETSTATUS) + "add r1, r4, #0x20\nmov r2, r5\n" + f"bl #{F_BUILDREPLY}\n"
         # net_send(net_response_buf)
@@ -118,61 +125,64 @@ def _emit_status_src():
 
 
 def _set_volume_src():
-    # r0 = struct (para @ +0x40). Règle 0x2000e1b8 vers la cible en réutilisant vol_up/vol_down.
+    # r0 = struct commande entrante (name@0, zone@0x20, para@0x40).
+    # Règle le volume à la valeur absolue de `para` en RÉ-INVOQUANT cmd_dispatch avec une
+    # commande volume-up/volume-down synthétisée (zone recopiée) -> emprunte le chemin stock
+    # prouvé (passe les gardes). Tout firmware. Boucle bornée, arrêt à |cur-cible|<=1.
     return (
         "push {r4,r5,r6,r7,lr}\n"
-        "add r4, r0, #0x40\n"                # r4 = para (chaîne décimale)
-        # --- atoi(para) -> r5 ---
+        "mov r7, r0\n"                       # r7 = struct entrant
+        "sub sp, #0x48\n"
+        "mov r4, sp\n"                       # r4 = struct synthétisé
+        # --- atoi(struct+0x40) -> r5 ---
+        "add r1, r7, #0x40\n"
         "movs r5, #0\n"
         "atoi_loop:\n"
-        "ldrb r6, [r4]\n"
-        "subs r6, r6, #0x30\n"               # c - '0'
-        "cmp r6, #9\n"
-        "bhi atoi_done\n"                    # non-chiffre (unsigned > 9) -> fin
-        "movs r7, #10\n"
-        "muls r5, r7, r5\n"                  # r5 = r5*10
-        "adds r5, r5, r6\n"
-        "adds r4, r4, #1\n"
+        "ldrb r2, [r1]\n"
+        "subs r2, r2, #0x30\n"
+        "cmp r2, #9\n"
+        "bhi atoi_done\n"
+        "movs r0, #10\n"
+        "muls r5, r0, r5\n"
+        "adds r5, r5, r2\n"
+        "adds r1, r1, #1\n"
         "b atoi_loop\n"
         "atoi_done:\n"
-        # --- clamp r5 à [0, VOL_MAX] ---
         f"cmp r5, #{VOL_MAX}\n"
         "bls clamp_ok\n"
         f"movs r5, #{VOL_MAX}\n"
         "clamp_ok:\n"
-        # --- boucle d'ajustement (bornée 128) ---
-        "movs r7, #0\n"                      # r7 = compteur
+        # --- memset(synth, 0, 0x48) ---
+        "mov r0, r4\nmovs r1, #0\nmovs r2, #0x48\n" + f"bl #{F_MEMSET}\n"
+        # --- zone: strcpy(synth+0x20, struct_in+0x20) ---  (zone valide pour passer le check)
+        "add r0, r4, #0x20\nadd r1, r7, #0x20\n" + f"bl #{F_STRCAT}\n"
+        # --- boucle bornée ---
+        "movs r6, #0\n"                      # r6 = compteur
         "sv_loop:\n"
-        "cmp r7, #128\n"
+        "cmp r6, #128\n"
         "bhs sv_end\n"
-        + _mw("r0", A_VOL) + "ldrb r6, [r0]\n"   # r6 = cur
-        "cmp r6, r5\n"
-        "beq sv_end\n"                       # cible atteinte
-        "bhi go_down\n"                      # cur > cible -> down
-        f"bl #{F_VOLUP}\n"
-        "b after_step\n"
-        "go_down:\n"
-        f"bl #{F_VOLDOWN}\n"
-        "after_step:\n"
-        + _mw("r0", A_VOL) + "ldrb r0, [r0]\n"   # r0 = nouv
-        "cmp r0, r6\n"
-        "beq sv_end\n"                       # pas de progrès (garde bloquante) -> stop
-        # croisement : was_below(r6<r5) != now_below(r0<r5) -> stop
-        "movs r1, #0\n"
-        "cmp r6, r5\n"
-        "bhs wb0\n"
-        "movs r1, #1\n"
-        "wb0:\n"
-        "movs r2, #0\n"
-        "cmp r0, r5\n"
-        "bhs nb0\n"
-        "movs r2, #1\n"
-        "nb0:\n"
-        "cmp r1, r2\n"
-        "bne sv_end\n"                       # croisement/overshoot -> stop
-        "adds r7, r7, #1\n"
+        + _mw("r0", A_VOL) + "ldrb r3, [r0]\n"   # r3 = cur
+        # abs(cur - cible) <= 1 -> stop
+        "subs r2, r3, r5\n"
+        "asrs r1, r2, #31\n"
+        "eors r2, r2, r1\n"
+        "subs r2, r2, r1\n"                  # r2 = |cur-cible|
+        "cmp r2, #1\n"
+        "bls sv_end\n"
+        # choisir volume-up / volume-down selon cur vs cible
+        "cmp r3, r5\n"
+        "bhi sv_down\n"                      # cur > cible -> down
+        + _mw("r1", 0x080def60) +           # "volume-up"
+        "b sv_setname\n"
+        "sv_down:\n"
+        + _mw("r1", 0x080def6c) +           # "volume-down"
+        "sv_setname:\n"
+        "mov r0, r4\n" + f"bl #{F_STRCAT}\n"     # strcpy(synth, name)
+        "mov r0, r4\n" + f"bl #{CMD_DISPATCH}\n"  # cmd_dispatch(synth) -> chemin stock (un pas)
+        "adds r6, r6, #1\n"
         "b sv_loop\n"
         "sv_end:\n"
+        "add sp, #0x48\n"
         "pop {r4,r5,r6,r7,pc}\n"
     )
 
@@ -224,6 +234,7 @@ def build_patch1(img, features=frozenset()):
     if "getstatus" in features:
         patchlib.write_bytes(img, va_to_off(STR_GETSTATUS), b"get-status\x00")
         patchlib.write_bytes(img, va_to_off(STR_COMMA), b",\x00")
+        patchlib.write_bytes(img, va_to_off(STR_FWVER), FW_VERSION.encode() + b"\x00")
         emit = patchlib.asm_thumb(_emit_status_src(), EMIT_STATUS)
         patchlib.write_bytes(img, va_to_off(EMIT_STATUS), emit)
     if "setvolume" in features:

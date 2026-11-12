@@ -21,3 +21,12 @@ def test_db_mapping_midpoint():
 def test_db_to_internal_roundtrip():
     for n in (0, 42, 110, 160, 180):
         assert ampli.db_to_internal(ampli.internal_to_db(n)) == n
+
+
+def test_parse_status_with_fw_version():
+    assert ampli.parse_status("90,0,17,1.0.0") == {
+        "vol": 90, "mute": False, "source": "Bluetooth", "fw": "1.0.0"}
+
+
+def test_parse_status_without_fw_has_no_fw_key():
+    assert "fw" not in ampli.parse_status("90,0,2")
