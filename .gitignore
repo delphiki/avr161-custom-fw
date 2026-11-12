@@ -17,3 +17,6 @@ venvpg/
 
 # Build outputs du patch (régénérables)
 firmware/patches/out/
+
+# SDD scratch (ledger exécution)
+.superpowers/
