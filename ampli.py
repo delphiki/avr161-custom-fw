@@ -129,6 +129,21 @@ class Ampli:
             time.sleep(MENU_STEP_DELAY - STEP_DELAY)
         self.send("ok")
 
+    def set_volume_absolute(self, target, max_steps=120):
+        """Règle le volume à une valeur absolue (0..180), côté client : lit get-status
+        puis envoie des volume-up/down jusqu'à la cible. Nécessite get-status (firmware
+        custom). Robuste (réutilise les commandes volume-up/down prouvées)."""
+        target = max(0, min(180, int(target)))
+        for _ in range(max_steps):
+            st = self.get_status()
+            if st is None:
+                return None
+            cur = st["vol"]
+            if abs(cur - target) <= 1:
+                return cur
+            self.send("volume-up" if cur < target else "volume-down")
+        return self.get_status()["vol"] if self.get_status() else None
+
     def get_status(self):
         """Interroge get-status (firmware custom) -> dict {vol,mute,source} ou None."""
         import re
@@ -187,11 +202,16 @@ def main(argv):
                   f"mute {'on' if st['mute'] else 'off'} | source {st['source']}")
         elif cmd in ("set-volume", "setvol"):
             if not args:
-                print("Usage : ampli.py set-volume <0-180 | NdB>  (firmware custom)", file=sys.stderr)
+                print("Usage : ampli.py set-volume <0-180 | NdB>  (nécessite get-status)", file=sys.stderr)
                 return 2
             a = args[0].lower()
             n = db_to_internal(float(a[:-2])) if a.endswith("db") else int(a)
-            amp.send("set-volume", str(max(0, min(180, n))))
+            res = amp.set_volume_absolute(n)
+            if res is None:
+                print("set-volume impossible (get-status sans réponse — firmware custom requis).",
+                      file=sys.stderr)
+                return 1
+            print(f"volume {res} ({internal_to_db(res):+.1f} dB)")
         elif cmd == "source":
             if not args:
                 print("Sources directes : " + ", ".join(SOURCES + ["MHL", "Bluetooth"]), file=sys.stderr)
