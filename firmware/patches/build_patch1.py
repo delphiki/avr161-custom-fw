@@ -58,13 +58,20 @@ A_SRC        = 0x2000e1ae          # source enum (u8)
 F_VOLUP      = 0x0801b568          # vol_up()  (incrémente+applique 0x2000e1b8)
 F_VOLDOWN    = 0x0801b8f0          # vol_down()
 VOL_MAX      = 180                 # 0..0xB4
+F_SETSRCBT   = 0x0801af34          # set_src_Bluetooth() (auto-suffisant)
+F_SRCCOMMIT  = 0x08018944          # post-step source (comme la branche HomeNetwork)
+A_SWFLAG     = 0x2000e1ab          # g_src_switch_flag (=0x19 pendant un switch)
+A_PWRZONE    = 0x2000ddd4          # flags power/zone (bit1 -> condition post-step)
 
 # --- layout du cave (zone réécrite 0x080E0000) ---
 STR_GETSTATUS = CAVE_VA + 0x000    # "get-status\0"
 STR_COMMA     = CAVE_VA + 0x010    # ",\0"
 STR_SETVOL    = CAVE_VA + 0x018    # "set-volume\0"
+STR_SOURCESEL = CAVE_VA + 0x020    # "source-selection\0"
+STR_BLUETOOTH = CAVE_VA + 0x032    # "Bluetooth\0"
 EMIT_STATUS   = CAVE_VA + 0x040    # routine emit_status
 SET_VOLUME    = CAVE_VA + 0x280    # routine set_volume
+BT_HANDLER    = CAVE_VA + 0x340    # routine bascule Bluetooth
 CAVE_DISPATCH = CAVE_VA + 0x180    # entrée depuis le trampoline
 
 
@@ -170,6 +177,21 @@ def _set_volume_src():
     )
 
 
+def _bt_handler_src():
+    # Bascule Bluetooth — réplique la branche réseau HomeNetwork (review #4).
+    return (
+        "push {lr}\n"
+        + _mw("r0", A_SWFLAG) + "movs r1, #0x19\nstrb r1, [r0]\n"   # g_src_switch_flag = 0x19
+        + f"bl #{F_SETSRCBT}\n"                                     # set_src_Bluetooth()
+        # post-step conditionnel : si bit1 de *0x2000ddd4 == 0 -> FUN_08018944()
+        + _mw("r0", A_PWRZONE) + "ldrb r0, [r0]\nlsrs r0, r0, #1\nand r0, r0, #1\n"
+        "cmp r0, #0\nbne bt_skip\n"
+        + f"bl #{F_SRCCOMMIT}\n"
+        "bt_skip:\n"
+        "pop {pc}\n"
+    )
+
+
 def _cave_dispatch_part1(features):
     # r0 = param_1 (name ptr) ; lr = retour vers l'appelant de cmd_dispatch (détour avant son push)
     s = "push {r0, r4, lr}\nmov r4, r0\n"
@@ -183,6 +205,14 @@ def _cave_dispatch_part1(features):
               "cmp r0, #0\nbne not_sv\n"
               f"mov r0, r4\nbl #{SET_VOLUME}\npop {{r0, r4, pc}}\n"
               "not_sv:\n")
+    if "bluetooth" in features:
+        # source-selection + para==Bluetooth -> bascule BT
+        s += ("mov r0, r4\n" + _mw("r1", STR_SOURCESEL) + f"bl #{F_STRCMP}\n"
+              "cmp r0, #0\nbne not_bt\n"
+              "add r0, r4, #0x40\n" + _mw("r1", STR_BLUETOOTH) + f"bl #{F_STRCMP}\n"
+              "cmp r0, #0\nbne not_bt\n"
+              f"bl #{BT_HANDLER}\npop {{r0, r4, pc}}\n"
+              "not_bt:\n")
     s += "pop {r0, r4, lr}\n"                 # pas pour nous -> restaurer, exécuter prologue déplacé
     return s
 
@@ -190,7 +220,7 @@ def _cave_dispatch_part1(features):
 def build_patch1(img, features=frozenset()):
     """Construit l'image patchée pour les `features` demandées."""
     features = set(features)
-    needs_dispatch = bool(features & {"getstatus", "setvolume"})
+    needs_dispatch = bool(features & {"getstatus", "setvolume", "bluetooth"})
     if "getstatus" in features:
         patchlib.write_bytes(img, va_to_off(STR_GETSTATUS), b"get-status\x00")
         patchlib.write_bytes(img, va_to_off(STR_COMMA), b",\x00")
@@ -200,6 +230,11 @@ def build_patch1(img, features=frozenset()):
         patchlib.write_bytes(img, va_to_off(STR_SETVOL), b"set-volume\x00")
         sv = patchlib.asm_thumb(_set_volume_src(), SET_VOLUME)
         patchlib.write_bytes(img, va_to_off(SET_VOLUME), sv)
+    if "bluetooth" in features:
+        patchlib.write_bytes(img, va_to_off(STR_SOURCESEL), b"source-selection\x00")
+        patchlib.write_bytes(img, va_to_off(STR_BLUETOOTH), b"Bluetooth\x00")
+        bt = patchlib.asm_thumb(_bt_handler_src(), BT_HANDLER)
+        patchlib.write_bytes(img, va_to_off(BT_HANDLER), bt)
     if needs_dispatch:
         displaced = patchlib.detour(img, CMD_DISPATCH, CAVE_DISPATCH)
         part1 = patchlib.asm_thumb(_cave_dispatch_part1(features), CAVE_DISPATCH)
