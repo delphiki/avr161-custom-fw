@@ -17,3 +17,19 @@ def build_testA(img):
     assert cur == _STOCK_SRCNAME, f"chaîne source inattendue à {SRCNAME_OFF:#x}: {cur!r}"
     patchlib.write_bytes(img, SRCNAME_OFF, TESTA_STRING)
     return img
+
+
+# --- Test B : témoin RÉSEAU (User-Agent dans la réponse heart-alive, 100% MCU) ---
+# Prouve sans ambiguïté que le flash MCU écrit nos octets (lisible via ampli.py).
+UA_KARDON_OFF = 0xd4752          # "Kardon" dans "Harman Kardon AVR161/AVR1610" (UA heart-alive)
+_STOCK_KARDON = b"Kardon"
+TESTB_TOKEN = b"PATCH1"          # même longueur ; préserve les tokens modèle AVR161/AVR1610
+
+
+def build_testB(img):
+    """Change 'Kardon' -> 'PATCH1' dans le User-Agent émis à chaque heart-alive."""
+    assert len(TESTB_TOKEN) == len(_STOCK_KARDON)
+    cur = bytes(img[UA_KARDON_OFF:UA_KARDON_OFF + len(_STOCK_KARDON)])
+    assert cur == _STOCK_KARDON, f"attendu 'Kardon' à {UA_KARDON_OFF:#x}, obtenu {cur!r}"
+    patchlib.write_bytes(img, UA_KARDON_OFF, TESTB_TOKEN)
+    return img
