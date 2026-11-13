@@ -5,7 +5,7 @@ CAVE_VA = 0x080E0000  # base du code-cave (zone réécrite, 128 Ko de 0xFF)
 
 # Version du firmware CUSTOM (indépendante du stock V002.20). Source unique de vérité :
 # embarquée dans le firmware (4e champ de get-status) + nom de l'artefact + tag de release.
-FW_VERSION = "1.0.0"
+FW_VERSION = "1.0.4"
 
 # --- Test A : patch cosmétique d'un nom de source OSD (preuve de récupération USB) ---
 SRCNAME_OFF = 0xd9904            # flash 0x080d9904 : "USB" dans la table d'affichage source (0x8053684)
@@ -62,6 +62,7 @@ A_SRC        = 0x2000e1ae          # source enum (u8)
 F_VOLUP      = 0x0801b568          # vol_up()  (incrémente+applique 0x2000e1b8)
 F_VOLDOWN    = 0x0801b8f0          # vol_down()
 VOL_MAX      = 180                 # 0..0xB4
+A_STEPTMR    = 0x2000e1cd          # < 0xd -> vol_up/down font un pas de 2, sinon 4 (posé à 0x14 après un pas)
 F_SETSRCBT   = 0x0801af34          # set_src_Bluetooth() (auto-suffisant)
 F_SRCCOMMIT  = 0x08018944          # post-step source (comme la branche HomeNetwork)
 A_SWFLAG     = 0x2000e1ab          # g_src_switch_flag (=0x19 pendant un switch)
@@ -71,8 +72,8 @@ A_PWRZONE    = 0x2000ddd4          # flags power/zone (bit1 -> condition post-st
 STR_GETSTATUS = CAVE_VA + 0x000    # "get-status\0"
 STR_COMMA     = CAVE_VA + 0x010    # ",\0"
 STR_SETVOL    = CAVE_VA + 0x018    # "set-volume\0"
-STR_SOURCESEL = CAVE_VA + 0x020    # "source-selection\0"
-STR_BLUETOOTH = CAVE_VA + 0x032    # "Bluetooth\0"
+STR_SOURCESEL = CAVE_VA + 0x024    # "source-selection\0" (17 o ; APRÈS "set-volume\0" qui finit à +0x22)
+STR_BLUETOOTH = CAVE_VA + 0x035    # "Bluetooth\0" (10 o, finit à +0x3e < EMIT_STATUS)
 STR_FWVER     = CAVE_VA + 0x3c0    # version custom (ex. "1.0.0\0") — 4e champ de get-status
 EMIT_STATUS   = CAVE_VA + 0x040    # routine emit_status
 SET_VOLUME    = CAVE_VA + 0x280    # routine set_volume
@@ -126,15 +127,29 @@ def _emit_status_src():
 
 def _set_volume_src():
     # r0 = struct commande entrante (name@0, zone@0x20, para@0x40).
-    # Règle le volume à la valeur absolue de `para` en RÉ-INVOQUANT cmd_dispatch avec une
-    # commande volume-up/volume-down synthétisée (zone recopiée) -> emprunte le chemin stock
-    # prouvé (passe les gardes). Tout firmware. Boucle bornée, arrêt à |cur-cible|<=1.
+    # Règle le volume à la valeur absolue de `para`, en UN coup et PILE sur la cible :
+    #   1. cur = master (0x2000e1b8) ; si cur == cible -> rien à faire.
+    #   2. pas = celui que fera le firmware (cf. vol_down 0x801b8f0 / vol_up 0x801b568) :
+    #        descente : 2 si *0x2000e1cd < 0xd, sinon 4
+    #        montée   : 2 si *0x2000e1cd < 0xd OU master pré-jumpé > 0x8b, sinon 4
+    #                   (=> 4 seulement si timer >= 0xd et cible <= 143)
+    #   3. pré-jump : master = cible+pas (descente) ou cible-pas (montée), clampé 0..180.
+    #   4. UN pas volume-down/volume-up synthétisé via cmd_dispatch (chemin stock complet :
+    #      gardes, application matériel, OSD) -> master == cible.
+    #   5. si le pas a été REFUSÉ (gardes vol_up/down, cooldown 0x2000e2a6 du dispatch) le
+    #      master vaut encore la valeur pré-jumpée -> on RESTAURE cur (jamais de variable
+    #      master désynchronisée du matériel).
+    # Aux butées (cible+pas > 180 ou cible-pas < 0) le pré-jump est clampé : on atterrit à
+    # un pas de la cible au pire.
+    # Compact (<= 0xa0 octets) : l'empreinte du cave ne doit pas dépasser celle de v1.0.2
+    # (cf. test_set_volume_footprint_stays_within_proven_region).
+    assert A_STEPTMR - A_VOL == 0x15
     return (
         "push {r4,r5,r6,r7,lr}\n"
-        "mov r7, r0\n"                       # r7 = struct entrant
-        "sub sp, #0x48\n"
+        "mov r7, r0\n"                       # r7 = struct entrant (puis valeur pré-jump)
+        "sub sp, #0x50\n"                    # 0x48 struct synthétisé + [sp,#0x48] = &master
         "mov r4, sp\n"                       # r4 = struct synthétisé
-        # --- atoi(struct+0x40) -> r5 ---
+        # --- atoi(struct+0x40) -> r5, clamp 0..180 ---
         "add r1, r7, #0x40\n"
         "movs r5, #0\n"
         "atoi_loop:\n"
@@ -145,44 +160,61 @@ def _set_volume_src():
         "movs r0, #10\n"
         "muls r5, r0, r5\n"
         "adds r5, r5, r2\n"
+        f"cmp r5, #{VOL_MAX}\n"              # clamp à chaque chiffre (pas de débordement)
+        "bls atoi_next\n"
+        f"movs r5, #{VOL_MAX}\n"
+        "atoi_next:\n"
         "adds r1, r1, #1\n"
         "b atoi_loop\n"
         "atoi_done:\n"
-        f"cmp r5, #{VOL_MAX}\n"
-        "bls clamp_ok\n"
-        f"movs r5, #{VOL_MAX}\n"
-        "clamp_ok:\n"
-        # --- memset(synth, 0, 0x48) ---
-        "mov r0, r4\nmovs r1, #0\nmovs r2, #0x48\n" + f"bl #{F_MEMSET}\n"
-        # --- zone: strcpy(synth+0x20, struct_in+0x20) ---  (zone valide pour passer le check)
+        # --- &master gardé en pile ; cur -> r6 ; déjà à la cible ? ---
+        + _mw("r0", A_VOL) + "str r0, [sp, #0x48]\n"
+        "ldrb r6, [r0]\n"
+        "cmp r6, r5\n"
+        "beq sv_end\n"
+        # --- struct synthétisé : zone recopiée, para = "" (le nom est posé plus bas) ---
         "add r0, r4, #0x20\nadd r1, r7, #0x20\n" + f"bl #{F_STRCAT}\n"
-        # --- boucle bornée ---
-        "movs r6, #0\n"                      # r6 = compteur
-        "sv_loop:\n"
-        "cmp r6, #128\n"
-        "bhs sv_end\n"
-        + _mw("r0", A_VOL) + "ldrb r3, [r0]\n"   # r3 = cur
-        # abs(cur - cible) <= 1 -> stop
-        "subs r2, r3, r5\n"
-        "asrs r1, r2, #31\n"
-        "eors r2, r2, r1\n"
-        "subs r2, r2, r1\n"                  # r2 = |cur-cible|
-        "cmp r2, #1\n"
-        "bls sv_end\n"
-        # choisir volume-up / volume-down selon cur vs cible
-        "cmp r3, r5\n"
-        "bhi sv_down\n"                      # cur > cible -> down
-        + _mw("r1", 0x080def60) +           # "volume-up"
-        "b sv_setname\n"
+        "movs r1, #0\nstr r1, [sp, #0x40]\n"
+        # --- r0 = &master (conservé jusqu'au strb), r2 = timer de pas, r3 = pas, r1 = nom ---
+        "ldr r0, [sp, #0x48]\n"
+        "ldrb r2, [r0, #0x15]\n"             # *0x2000e1cd
+        "movs r3, #2\n"
+        + _mw("r1", 0x080def60) +            # "volume-up"
+        "cmp r6, r5\n"
+        "bhi sv_down\n"
+        # montée : pas de 4 seulement si timer >= 0xd ET cible <= 143
+        "cmp r2, #0xd\n"
+        "blo sv_up_s\n"
+        "cmp r5, #143\n"
+        "bhi sv_up_s\n"
+        "movs r3, #4\n"
+        "sv_up_s:\n"
+        "subs r7, r5, r3\n"                  # pré-jump = cible - pas (>= 0)
+        "bpl sv_go\n"
+        "movs r7, #0\n"
+        "b sv_go\n"
         "sv_down:\n"
-        + _mw("r1", 0x080def6c) +           # "volume-down"
-        "sv_setname:\n"
+        "adds r1, #0xc\n"                    # "volume-down" = "volume-up" + 0xc (0x080def6c)
+        "cmp r2, #0xd\n"                     # descente : pas de 4 si timer >= 0xd
+        "blo sv_dn_s\n"
+        "movs r3, #4\n"
+        "sv_dn_s:\n"
+        "adds r7, r5, r3\n"                  # pré-jump = cible + pas (<= 180)
+        f"cmp r7, #{VOL_MAX}\n"
+        "bls sv_go\n"
+        f"movs r7, #{VOL_MAX}\n"
+        "sv_go:\n"
+        "strb r7, [r0]\n"                    # *master = pré-jump
         "mov r0, r4\n" + f"bl #{F_STRCAT}\n"     # strcpy(synth, name)
-        "mov r0, r4\n" + f"bl #{CMD_DISPATCH}\n"  # cmd_dispatch(synth) -> chemin stock (un pas)
-        "adds r6, r6, #1\n"
-        "b sv_loop\n"
+        "mov r0, r4\n" + f"bl #{CMD_DISPATCH}\n"  # UN pas par le chemin stock
+        # --- pas refusé ? (master toujours == pré-jump) -> restaurer cur ---
+        "ldr r0, [sp, #0x48]\n"
+        "ldrb r3, [r0]\n"
+        "cmp r3, r7\n"
+        "bne sv_end\n"
+        "strb r6, [r0]\n"
         "sv_end:\n"
-        "add sp, #0x48\n"
+        "add sp, #0x50\n"
         "pop {r4,r5,r6,r7,pc}\n"
     )
 
@@ -231,26 +263,37 @@ def build_patch1(img, features=frozenset()):
     """Construit l'image patchée pour les `features` demandées."""
     features = set(features)
     needs_dispatch = bool(features & {"getstatus", "setvolume", "bluetooth"})
+    claimed = []                              # plages [début, fin) déjà écrites dans le cave
+
+    def put(va, data):
+        """Écrit dans le cave en REFUSANT tout chevauchement avec une écriture précédente
+        (un chevauchement de chaînes a rendu set-volume inopérant de v1.0.0 à v1.0.1)."""
+        lo, hi = va, va + len(data)
+        for clo, chi in claimed:
+            if lo < chi and clo < hi:
+                raise ValueError(f"chevauchement cave: [{lo:#x},{hi:#x}) vs [{clo:#x},{chi:#x})")
+        claimed.append((lo, hi))
+        patchlib.write_bytes(img, va_to_off(va), data)
     if "getstatus" in features:
-        patchlib.write_bytes(img, va_to_off(STR_GETSTATUS), b"get-status\x00")
-        patchlib.write_bytes(img, va_to_off(STR_COMMA), b",\x00")
-        patchlib.write_bytes(img, va_to_off(STR_FWVER), FW_VERSION.encode() + b"\x00")
+        put(STR_GETSTATUS, b"get-status\x00")
+        put(STR_COMMA, b",\x00")
+        put(STR_FWVER, FW_VERSION.encode() + b"\x00")
         emit = patchlib.asm_thumb(_emit_status_src(), EMIT_STATUS)
-        patchlib.write_bytes(img, va_to_off(EMIT_STATUS), emit)
+        put(EMIT_STATUS, emit)
     if "setvolume" in features:
-        patchlib.write_bytes(img, va_to_off(STR_SETVOL), b"set-volume\x00")
+        put(STR_SETVOL, b"set-volume\x00")
         sv = patchlib.asm_thumb(_set_volume_src(), SET_VOLUME)
-        patchlib.write_bytes(img, va_to_off(SET_VOLUME), sv)
+        put(SET_VOLUME, sv)
     if "bluetooth" in features:
-        patchlib.write_bytes(img, va_to_off(STR_SOURCESEL), b"source-selection\x00")
-        patchlib.write_bytes(img, va_to_off(STR_BLUETOOTH), b"Bluetooth\x00")
+        put(STR_SOURCESEL, b"source-selection\x00")
+        put(STR_BLUETOOTH, b"Bluetooth\x00")
         bt = patchlib.asm_thumb(_bt_handler_src(), BT_HANDLER)
-        patchlib.write_bytes(img, va_to_off(BT_HANDLER), bt)
+        put(BT_HANDLER, bt)
     if needs_dispatch:
         displaced = patchlib.detour(img, CMD_DISPATCH, CAVE_DISPATCH)
         part1 = patchlib.asm_thumb(_cave_dispatch_part1(features), CAVE_DISPATCH)
         cont_va = CAVE_DISPATCH + len(part1) + len(displaced)
         bw = patchlib.asm_thumb(f"b.w #{CMD_DISPATCH + len(displaced)}", cont_va)
         blob = part1 + displaced + bw
-        patchlib.write_bytes(img, va_to_off(CAVE_DISPATCH), blob)
+        put(CAVE_DISPATCH, blob)
     return img

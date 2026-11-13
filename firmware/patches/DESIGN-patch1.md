@@ -79,6 +79,13 @@ Deux points de détour (tous deux dans la zone réécrite), un seul cave (entré
 - **Test** : `./ampli.py raw get-status` → réponse parsable ; recouper avec set-volume round-trip (cf. test).
 
 ## Feature 3 — set-volume (nouvelle commande, natif firmware)
+> **Révision v1.0.4 (2026-11-13) — le design « boucle de pas » ci-dessous est REMPLACÉ.**
+> Le dispatch stock ignore toute commande pendant un cooldown après une commande traitée
+> (`*0x2000e2a6 = 0x32`), donc une boucle de pas ré-entrants ne fait qu'UN pas. Design retenu,
+> validé sur matériel : `master = cible ± pas` (pas 2 ou 4 prédit via `*0x2000e1cd`), UN
+> `volume-up/down` synthétisé via `cmd_dispatch`, restauration du volume d'origine si le pas
+> est refusé. Détails et historique des échecs : `../re/NOTES.md`.
+
 - **Hook** : même détour B (`cmd_dispatch` `0x0804f328`).
 - **Logique ajoutée (cave)** : `if strcmp(cmd,"set-volume")==0 { cible=atoi(para); régler; return }`.
 - **Algorithme (réutilise les pas prouvés) — RÉVISÉ (review #5, anti-oscillation)** :

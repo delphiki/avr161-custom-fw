@@ -292,3 +292,48 @@ Reset 0x800d36c -> startup 0x800d188 -> **bl 0x8005500 = main() RÉSIDENT** (zon
   Seul un patch cassant le BOOT PRÉCOCE serait non récupérable par USB -> SWD. Ce patch ne touche pas ça.
 - PREUVE EMPIRIQUE (test A) : flasher un défaut OSD cosmétique observable (zone app) ; vérifier boot+défaut ;
   puis clé STOCK + power-cycle -> le défaut disparaît = récup auto prouvée. Couvre le profil de risque du patch.
+
+## set-volume firmware : CAUSE RÉELLE des échecs v1.0.0 → v1.0.2d (2026-11-13) ★
+**Le handler set-volume n'a JAMAIS été exécuté sur l'ampli** dans aucun build incluant le Bluetooth.
+- Bug de layout du cave : "set-volume\0" (11 o à +0x18, finit à +0x22) était écrasé par
+  "source-selection" écrit ensuite à +0x20 -> la chaîne en flash valait "set-volusource-selection",
+  le strcmp du cave ne matchait jamais, la commande tombait dans le dispatch stock (inconnue = no-op).
+- Prouvé par émulation Unicorn du cave contre les images flashées + dump xxd à 0xE0010.
+- Les tests ne le voyaient pas : ils ne vérifiaient que le désassemblage, et le test set-volume
+  construisait sans la feature bluetooth.
+- CONSÉQUENCE : les diagnostics "garde no-op", "rate-limit" et "crash dû au pré-jump" étaient
+  tous FAUX (aucun n'observait le handler). Le test v1.0.2d "sans pré-jump = pas de crash"
+  ne prouvait rien : ni v1.0.1 ni v1.0.2d n'exécutaient ce code.
+- Le crash observé une fois sur v1.0.1 (port 10025 mort après status/set-volume, récupéré par
+  coupure secteur) reste INEXPLIQUÉ : la même séquence réseau rejouée >10 fois sur v1.0.2d
+  (code exécuté identique) n'a jamais replanté. n=1, cause inconnue.
+- Correctif (v1.0.2) : STR_SOURCESEL -> +0x24, STR_BLUETOOTH -> +0x35 ; garde anti-chevauchement
+  `put()` dans build_patch1 ; tests comportementaux par émulation (tests/emu.py).
+
+## Dispatch réseau stock : portes et cooldown (décompilation cmd_dispatch 0x804f328)
+- heart-alive traité en premier (réponse), puis portes : zone == "Main Zone" (strncmp 9) ;
+  FUN_0802f348() != 0 ; **\*0x2000e2a6 == 0** ; FUN_08071816() == 0 (sinon seules les cmd power passent).
+- Après toute commande traitée : **\*0x2000e2a6 = 0x32 (cooldown)** + FUN_0802f194(). Tant qu'il n'est
+  pas retombé à 0, les commandes suivantes sont IGNORÉES. Mesuré : 2 volume-up espacés de 0,1 s
+  = 1 seul pas ; espacés de 0,6 s = 2 pas. => une boucle de pas ré-entrants ne ferait qu'UN pas.
+- vol_down 0x801b8f0 / vol_up 0x801b568 : gardes (0x2000ddd4 bit1, 0x2000dd5c==0, 0x2000e1ab==0,
+  0x2000db40 bit13, 0x2000e1d9==0, FUN_0802aa5c()!=1, 0x2000db94 bit6) ; pas = 2 si 0x2000e1cd<0xd
+  (ou master>0x8b en montée) sinon 4 ; puis FUN_08018464 (application + OSD) ; 0x2000e1cd=0x14.
+
+## set-volume v1.0.2 : design "un seul coup" (PAS ENCORE VALIDÉ SUR MATÉRIEL)
+cur=master ; si |cur-cible|<=1 rien ; master=cible±3 (clamp) ; UN volume-down/up synthétisé via
+cmd_dispatch ; si master est resté à la valeur pré-jumpée (pas refusé : gardes/cooldown) -> on
+restaure cur. Atterrit à ±1 que le pas vaille 2 ou 4. Premier build où ce code s'exécutera vraiment.
+
+## v1.0.3 : service réseau mort au démarrage — NON ÉLUCIDÉ (2026-11-13)
+Faits : v1.0.3 (set-volume « cible exacte », 0xb4 octets) flashé une fois -> port 10025 mort sur 3
+démarrages (refusé d'emblée ; puis 1 connexion acceptée et plus rien, 2 fois), sans AUCUNE commande
+set-volume envoyée. v1.0.2 reflashé -> sain, y compris sous la même sonde agressive juste après
+démarrage à froid (réfute « connexion trop tôt »). Source MHL (= enum 2) hors de cause.
+Écarté statiquement : écriture ratée (l'updater relit chaque mot, 3 essais puis boucle infinie :
+un flash terminé = flash identique au fichier) ; référence stock vers la zone ; secteur 11 utilisé
+comme stockage (seul pilote flash = résident) ; motif d'octets commun v1.0.1/v1.0.3.
+Seule différence structurelle : v1.0.3 est le 1er build à occuper +0x320..+0x333 du cave.
+Hypothèse NON PROUVÉE : quelque chose lit cette zone. Contournement : v1.0.4 = même algorithme
+compacté à 0x96 octets (aucun octet modifié hors empreinte v1.0.2), test de garde ajouté.
+Si v1.0.4 échoue aussi : c'est le contenu et non l'empreinte -> revenir à v1.0.2.
