@@ -23,26 +23,18 @@ targets the STM32 MCU (code caves + detours in the rewritten flash region).
 | # | Feature | Implemented | Validated on hardware |
 |---|---------|:-----------:|:---------------------:|
 | 1  | `get-status` — real-time volume / mute / source / firmware version | ✅ | ✅ |
-| 2  | `set-volume` — absolute volume (0–180) | ✅ firmware¹ | ✅ (v1.0.4) |
-| 3  | Direct Bluetooth source select | ✅ | ✅ (re-checked on v1.0.4) |
+| 2  | `set-volume` — absolute volume (0–180) | ✅ | ✅ |
+| 3  | Direct Bluetooth source select | ✅ | ✅ |
 | 4  | Push state on change (Home Assistant without polling) | ⬜ planned | — |
 | 5  | Configurable power-on source + volume | ⬜ planned | — |
 | 6  | Volume ceiling (max / at power-on) | ⬜ planned | — |
 | 9  | HDMI-CEC: don't power off when the TV turns off | ⬜ planned | — |
 | 10 | HDMI-CEC: better power / volume / input sync | ⬜ planned | — |
-| 11 | Surround mode per source / direct selection² | ⬜ planned | — |
+| 11 | Surround mode per source / direct selection¹ | ⬜ planned | — |
 | 12 | Per-input level trim | ⬜ planned | — |
 | 27 | ~~Zone 2~~ | ❌ dropped | hardware-impossible (single NJU72340 feeds all channels) |
 
-¹ One network command, one jump, lands exactly on the target: the handler writes the master
-volume to `target ± step` (it predicts whether the firmware will step by 2 or 4), then issues a
-single synthesized `volume-up`/`volume-down` through the stock dispatcher so the stock path
-applies it to the hardware and the OSD. If the stock step is refused (guards, or the
-dispatcher's post-command cooldown) the original volume is restored. Near the 0/180 limits it
-can end one step away. Works from **v1.0.4**; in the released v1.0.0 the routine is present
-but unreachable (see *Firmware releases*). `ampli.py` falls back to stepping volume-up/down on
-older firmware.
-² A native `surround-mode` command already exists over the API, but it **cycles** modes (the
+¹ A native `surround-mode` command already exists over the API, but it **cycles** modes (the
 `para` is ignored). Feature 11 would add reading the current mode and direct selection.
 
 Patch #1 ships features **1, 2, 3**. Remaining selected features: **4, 5, 6, 9, 10, 11, 12**.
