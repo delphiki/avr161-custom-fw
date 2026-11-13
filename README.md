@@ -17,28 +17,28 @@ Reverse engineering, a network control tool, and **custom firmware** for a
 
 ## Feature status
 
-Features the owner selected during scoping (numbering kept from that list). Everything
+Features the owner selected during scoping. Everything
 targets the STM32 MCU (code caves + detours in the rewritten flash region).
 
-| # | Feature | Implemented | Validated on hardware |
-|---|---------|:-----------:|:---------------------:|
-| 1  | `get-status` — real-time volume / mute / source / firmware version | ✅ | ✅ |
-| 2  | `set-volume` — absolute volume (0–180) | ✅ | ✅ |
-| 3  | Direct Bluetooth source select | ✅ | ✅ |
-| 4  | Push state on change (Home Assistant without polling) | ⬜ planned | — |
-| 5  | Configurable power-on source + volume | ⬜ planned | — |
-| 6  | Volume ceiling (max / at power-on) | ⬜ planned | — |
-| 9  | HDMI-CEC: don't power off when the TV turns off | ⬜ planned | — |
-| 10 | HDMI-CEC: better power / volume / input sync | ⬜ planned | — |
-| 11 | Surround mode per source / direct selection¹ | ⬜ planned | — |
-| 12 | Per-input level trim | ⬜ planned | — |
-| 28 | Network power-on that always works, whether the amp is in sleep or off | ⬜ planned | — |
-| 27 | ~~Zone 2~~ | ❌ dropped | hardware-impossible (single NJU72340 feeds all channels) |
+| Feature | Implemented | Validated on hardware |
+|---------|:-----------:|:---------------------:|
+| `get-status` — real-time volume / mute / source / firmware version | ✅ | ✅ |
+| `set-volume` — absolute volume (0–180) | ✅ | ✅ |
+| Direct Bluetooth source select | ✅ | ✅ |
+| Push state on change (Home Assistant without polling) | ⬜ planned | — |
+| Configurable power-on source + volume | ⬜ planned | — |
+| Volume ceiling (max / at power-on) | ⬜ planned | — |
+| HDMI-CEC: don't power off when the TV turns off | ⬜ planned | — |
+| HDMI-CEC: better power / volume / input sync | ⬜ planned | — |
+| Surround mode per source / direct selection¹ | ⬜ planned | — |
+| Per-input level trim | ⬜ planned | — |
+| Network power-on that always works, whether the amp is in sleep or off | ⬜ planned | — |
+| ~~Zone 2~~ | ❌ dropped | hardware-impossible (single NJU72340 feeds all channels) |
 
 ¹ A native `surround-mode` command already exists over the API, but it **cycles** modes (the
-`para` is ignored). Feature 11 would add reading the current mode and direct selection.
+`para` is ignored). This feature would add reading the current mode and direct selection.
 
-Patch #1 ships features **1, 2, 3**. Remaining selected features: **4, 5, 6, 9, 10, 11, 12, 28**.
+Patch #1 ships the first three; the rest are planned.
 
 ## Firmware releases — exact contents
 
