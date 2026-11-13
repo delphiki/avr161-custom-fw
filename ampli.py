@@ -14,6 +14,9 @@ Usage :
     ampli.py set-volume <n|NdB>    volume absolu 0-180 ou en dB (ex. -25db) ; une seule
                                    commande avec le firmware custom >= 1.0.4, sinon
                                    boucle de pas côté client
+    ampli.py surround [mode]       sans argument : mode surround courant et liste des modes ;
+                                   avec un nom, un code (0-45) ou « auto » (Auto Select) :
+                                   sélection directe (firmware custom avec la fonction surround)
     ampli.py version               version du firmware custom
     ampli.py raw <commande> [para] envoie une commande brute (voir COMMANDS)
 
@@ -64,7 +67,8 @@ RAW_COMMANDS = ["power-on", "power-off", "power-toggle", "sleep",
                 "tune-up", "tune-down", "tone", "info", "options",
                 "home", "ok", "back", "up", "down", "left", "right",
                 "source-selection", "heart-alive", "bye-bye",
-                "get-status", "set-volume"]
+                "rds", "delay", "channel-up", "channel-down", "surround-mode",
+                "get-status", "set-volume", "set-surround", "power-full-off"]
 
 # Code de source renvoyé par get-status (firmware custom) -> nom lisible. Vérifié sur
 # l'ampli le 2026-11-13 en sélectionnant chaque source (16 = Home Network DMR : décompilage).
@@ -73,16 +77,65 @@ SOURCE_ENUM = {0: "Cable Sat", 1: "Disc", 2: "MHL", 3: "AUX", 4: "Game", 5: "STB
                12: "Home Network", 13: "vTuner", 16: "Home Network", 17: "Bluetooth"}
 
 
+# Code du mode surround (6e champ de get-status, para de set-surround) -> nom affiché par
+# l'ampli. Tiré de la routine d'affichage du firmware (FUN_0805b02c) ; plusieurs codes portent
+# le même nom (variantes selon le signal d'entrée et le nombre d'enceintes) : le premier sert
+# à la sélection par nom. L'ampli refuse un mode impossible avec le signal courant.
+SURROUND_MODES = {
+    0: "Virtual Surround", 1: "Virtual Surr.2", 2: "2CH Stereo", 3: "2CH Stereo",
+    4: "2CH Stereo", 5: "2CH Stereo", 6: "Dolby Digital", 7: "DTS", 8: "DTS 96/24",
+    9: "5CH Stereo", 10: "Dolby Digital EX", 11: "DTS-ES Matrix", 12: "DTS-ES Discrete",
+    13: "DTS Neo:6 Cinema", 14: "7CH Stereo", 15: "Logic 7 Movie", 16: "Dolby PLII Movie",
+    17: "DTS Neo:6 Cinema", 18: "Logic 7 Movie", 19: "Dolby PLIIx Movie",
+    20: "DTS Neo:6 Cinema", 21: "Logic 7 Music", 22: "Dolby PLII Music",
+    23: "DTS Neo:6 Music", 24: "Logic 7 Music", 25: "Dolby PLIIx Music",
+    26: "DTS Neo:6 Music", 27: "Logic 7 Game", 28: "Dolby PLII Game", 29: "Logic 7 Game",
+    30: "Dolby PLIIx Game", 31: "Dolby PLIIz", 32: "Dolby PLIIz", 33: "Dolby PLIIz",
+    37: "Dolby TrueHD", 38: "Dolby Digital Plus", 39: "DTS-HD Master", 40: "DTS-HD Hi Res",
+    41: "DTS-HD LBR", 42: "Headphone Bypass", 43: "Harman Headphone", 44: "Multi-CH PCM",
+    45: "Harman NSP",
+}
+SURROUND_MAX = 45
+# Modes que le défilement du firmware propose sur un ampli 5.1 (fonctions « mode suivant » de
+# chaque catégorie : FUN_0803a696 stéréo, a72e film, a858 musique, a922 jeu), en plus de
+# « Auto Select ». Nom -> codes à essayer dans l'ordre (variantes selon le signal).
+SURROUND_CHOICES = {
+    "Virtual Surround": [0], "2CH Stereo": [2, 3, 5], "5CH Stereo": [9], "Harman NSP": [45],
+    "Logic 7 Movie": [15, 18], "Dolby PLII Movie": [16], "DTS Neo:6 Cinema": [17, 13, 20],
+    "Logic 7 Music": [21, 24], "Dolby PLII Music": [22], "DTS Neo:6 Music": [23, 26],
+    "Logic 7 Game": [27, 29], "Dolby PLII Game": [28],
+}
+
+
+def surround_code(wanted):
+    """Nom (insensible à la casse) ou code décimal -> code de mode surround. ValueError sinon."""
+    w = wanted.strip().lower()
+    if w.isdigit():
+        if int(w) <= SURROUND_MAX:
+            return int(w)
+        raise ValueError(f"mode surround hors plage : {wanted}")
+    for code, name in SURROUND_MODES.items():
+        if name.lower() == w:
+            return code
+    raise ValueError(f"mode surround inconnu : {wanted!r}")
+
+
 def parse_status(para):
-    """Parse le `para` de get-status ('vol,mute,src[,fw[,pwr]]') ->
-    dict {vol,mute,source[,fw][,power]} ; power (firmware >= 1.0.5) : True = allumé, False = sleep."""
-    vol, mute, src, fw, pwr = (para.split(",") + ["", "", "", "", ""])[:5]
+    """Parse le `para` de get-status ('vol,mute,src[,fw[,pwr[,sur]]]') ->
+    dict {vol,mute,source[,fw][,power][,surround,surround_code]} ; power (firmware >= 1.0.5) :
+    True = allumé, False = sleep ; surround : nom du mode (ou son code s'il est inconnu)."""
+    vol, mute, src, fw, pwr, sur, cat = (para.split(",") + [""] * 7)[:7]
     d = {"vol": int(vol), "mute": bool(int(mute)),
          "source": SOURCE_ENUM.get(int(src), str(int(src)))}
     if fw:
         d["fw"] = fw          # version du firmware custom (patch >= v1.0.0)
     if pwr:
         d["power"] = bool(int(pwr))
+    if sur:
+        d["surround_code"] = int(sur)
+        d["surround"] = SURROUND_MODES.get(int(sur), str(int(sur)))
+    if cat:
+        d["surround_auto"] = int(cat) == 0     # catégorie 0 = Auto Select
     return d
 
 
@@ -124,9 +177,15 @@ def _request(name, para=""):
     return head + xml
 
 
+# Une requête envoyée dans les ~100 ms qui suivent la connexion est perdue une fois sur deux
+# (mesuré le 2026-11-13 : 22 servies sur 42 sans attente, 9 sur 9 avec 0,1 s ou plus).
+CONNECT_SETTLE = 0.3
+
+
 class Ampli:
     def __init__(self, host=HOST, port=PORT):
         self.sock = socket.create_connection((host, port), timeout=3)
+        time.sleep(CONNECT_SETTLE)
         if not self.ping():
             raise ConnectionError("l'ampli accepte la connexion mais ne répond pas")
 
@@ -253,11 +312,56 @@ def main(argv):
                 return 1
             line = (f"volume {st['vol']} ({internal_to_db(st['vol']):+.1f} dB) | "
                     f"mute {'on' if st['mute'] else 'off'} | source {st['source']}")
+            if "surround" in st:
+                line += (f" | surround Auto Select ({st['surround']})" if st.get("surround_auto")
+                         else f" | surround {st['surround']}")
             if "fw" in st:
                 line += f" | fw {st['fw']}"
             if "power" in st:
                 line = ("allumé | " if st["power"] else "en sleep | ") + line
             print(line)
+        elif cmd == "surround":
+            st = amp.get_status()
+            if st is None or "surround" not in st:
+                print("mode surround indisponible (firmware custom avec la fonction surround requis).",
+                      file=sys.stderr)
+                return 1
+            def shown(st):
+                return ((f"surround Auto Select ({st['surround']})" if st.get("surround_auto")
+                         else f"surround {st['surround']}") + f" (code {st['surround_code']})")
+            if not args:
+                print(shown(st))
+                print("Modes : auto, " + ", ".join(SURROUND_CHOICES))
+                return 0
+            wanted = " ".join(args)
+            if wanted.lower() in ("auto", "auto select"):
+                paras, done = ["auto"], (lambda st: st.get("surround_auto", False))
+            else:
+                try:
+                    code = surround_code(wanted)
+                except ValueError as e:
+                    print(e, file=sys.stderr)
+                    return 2
+                if wanted.strip().isdigit():       # code brut : on ne juge que le mode appliqué
+                    codes = [code]
+                    done = (lambda st: st["surround_code"] in codes)
+                else:
+                    codes = SURROUND_CHOICES.get(SURROUND_MODES.get(code), [code])
+                    done = (lambda st: st["surround_code"] in codes
+                            and not st.get("surround_auto", False))
+                paras = [str(c) for c in codes]
+            for para in paras * FW_TRIES:      # l'ampli ignore une commande trop rapprochée
+                if done(st):
+                    break
+                time.sleep(FW_RETRY_DELAY)
+                amp.send("set-surround", para)
+                time.sleep(FW_RETRY_DELAY)
+                st = amp.get_status() or st
+            print(shown(st))
+            if not done(st):
+                print("mode refusé par l'ampli (impossible avec le signal ou la source en cours ?).",
+                      file=sys.stderr)
+                return 1
         elif cmd == "version":
             st = amp.get_status()
             if st and "fw" in st:

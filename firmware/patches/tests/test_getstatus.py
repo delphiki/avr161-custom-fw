@@ -33,7 +33,7 @@ def test_getstatus_reads_state_and_arms_ctx():
     img = build_patch1(patchlib.load_stock(), features={"getstatus"})
     t = _cave_text(img)
     # état lu (demi-mots movw) : volume, mute, source
-    assert "0xe1b8" in t and "0xde40" in t and "0xe1ae" in t
+    assert "0xe1b8" in t and "0xdddc" in t and "0xe1ae" in t   # mute = bit 4 de 0x2000dddc
     # ctx "status_name" : armé (0xcb1c) >= 2 fois (set + restore), low de 0x80defc0 = 0xefc0
     assert t.count("0xcb1c") >= 2
     assert "0xefc0" in t

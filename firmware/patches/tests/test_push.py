@@ -95,7 +95,7 @@ def test_only_expected_regions_change():
     stock = patchlib.load_stock()
     out = build_patch1(bytearray(stock), features=ALL, version=VER)
     allowed = (set(range(0x10af6, 0x10b00)) | set(range(0x4f328, 0x4f32c))
-               | set(range(0xE0000, 0xE0400)))
+               | set(range(0xE0000, 0xE0400)) | set(range(0xE0440, 0xE04C0)))  # push_tick à +0x440
     verifylib.assert_only_changed(bytes(out), bytes(stock), allowed)
 
 

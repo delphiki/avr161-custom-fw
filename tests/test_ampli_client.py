@@ -1,3 +1,4 @@
+import pytest
 import ampli
 
 
@@ -122,3 +123,60 @@ def test_source_codes_verified_on_hardware():
     names = {0: "Cable Sat", 2: "MHL", 4: "Game", 7: "TV", 8: "AM", 9: "FM", 10: "USB", 17: "Bluetooth"}
     for code, name in names.items():
         assert ampli.parse_status(f"90,0,{code}")["source"] == name
+
+
+# --- surround (firmware custom avec la feature surround) ---
+
+def test_parse_status_reads_the_surround_mode_as_sixth_field():
+    st = ampli.parse_status("110,0,9,1.1.0-test,1,22")
+    assert st["surround"] == "Dolby PLII Music" and st["surround_code"] == 22
+
+
+def test_parse_status_keeps_an_unknown_surround_code_as_a_number():
+    st = ampli.parse_status("110,0,9,1.1.0,1,35")
+    assert st["surround"] == "35" and st["surround_code"] == 35
+
+
+def test_parse_status_without_surround_field_has_no_surround_key():
+    assert "surround" not in ampli.parse_status("110,0,9,1.0.5,1")
+
+
+@pytest.mark.parametrize("wanted,code", [
+    ("22", 22), ("Dolby PLII Music", 22), ("dolby plii music", 22), ("5CH Stereo", 9),
+    ("Logic 7 Movie", 15), ("Harman NSP", 45), ("0", 0), ("Virtual Surround", 0),
+])
+def test_surround_code_accepts_a_number_or_a_name(wanted, code):
+    assert ampli.surround_code(wanted) == code
+
+
+@pytest.mark.parametrize("wanted", ["46", "-1", "Nope", ""])
+def test_surround_code_rejects_unknown_modes(wanted):
+    with pytest.raises(ValueError):
+        ampli.surround_code(wanted)
+
+
+def test_every_named_mode_resolves_back_to_a_code_with_that_name():
+    for code, name in ampli.SURROUND_MODES.items():
+        assert ampli.SURROUND_MODES[ampli.surround_code(name)] == name
+
+
+def test_parse_status_reads_auto_select_from_the_category_field():
+    st = ampli.parse_status("110,0,9,1.1.0-test,1,6,0")
+    assert st["surround"] == "Dolby Digital" and st["surround_auto"] is True
+
+
+def test_parse_status_category_other_than_zero_is_not_auto():
+    assert ampli.parse_status("110,0,9,1.1.0-test,1,22,5")["surround_auto"] is False
+
+
+def test_selectable_modes_are_the_ones_a_5_1_amp_cycles_through():
+    assert list(ampli.SURROUND_CHOICES) == [
+        "Virtual Surround", "2CH Stereo", "5CH Stereo", "Harman NSP",
+        "Logic 7 Movie", "Dolby PLII Movie", "DTS Neo:6 Cinema",
+        "Logic 7 Music", "Dolby PLII Music", "DTS Neo:6 Music",
+        "Logic 7 Game", "Dolby PLII Game"]
+
+
+def test_every_selectable_mode_lists_codes_that_carry_its_name():
+    for name, codes in ampli.SURROUND_CHOICES.items():
+        assert codes and all(ampli.SURROUND_MODES[c] == name for c in codes)

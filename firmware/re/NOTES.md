@@ -396,3 +396,345 @@ trancher.)
 - Occupe pour la première fois le cave entre +0x1f0 et +0x279 (cf. mystère v1.0.3).
 - À établir sur matériel : à quel client part un message non sollicité quand plusieurs sont
   connectés ; comportement si le client s'est déconnecté pendant les 90 s.
+
+### Module réseau alimenté quand l'ampli est éteint ? (2026-11-13, statique seulement)
+- Manuel de service : module réseau = FS1230A « Chorus 3 / Milan » + PHY KSZ8851SNL, sur son
+  propre DC/DC 3,3 V dont la broche EN est le signal `NET_PWR_SW` = broche 78 du MCU =
+  **PD9**. (CORRIGÉ le 2026-11-13 après lecture du schéma en image : son entrée est le rail
+  de veille `ST+5V`, pas `+7VD` ; voir « Séquence d'alimentation » plus bas.) `BCO_RST` = broche 77 = PD8 ; liaison
+  SPI2 (PB12..15), `BCO_REQ` = PD11. Consommation annoncée : < 0,5 W en veille.
+- FUN_08040a84(port, masque) = mise à 1 (BSRR), FUN_08040a88 = mise à 0.
+- Séquence d'extinction FUN_0801396c (compteur 0x2000dd5c), deux chemins selon le bit 7 de
+  0x2000dddc :
+  - étape 0xc6 : éteint -> PD9 = 0 et PD8 = 0 ; sleep -> PD9 = 1 ;
+  - étape 0xaf : éteint -> une cinquantaine de sorties mises à 0 puis FUN_08011588(1)
+    (reconfigure des broches) ; sleep -> liste plus courte. Sorties coupées seulement en
+    « éteint » : PA8, PB1, PB9, PC7, PC8, PC9, PD9, PD12, PE1, PE5, PF0..PF3, PF5, PF11, PG3, PG4.
+- (Dépassé : le convertisseur du module est sur `ST+5V`, cf. plus bas.) Non établi : ce que
+  le MCU fait une fois éteint (boucle normale ou mode basse
+  consommation, d'où dépend la réception des commandes du module).
+- Idée en attente (demande du propriétaire) : temporisation sleep -> éteint réglable (24 h)
+  au lieu de « jamais » ; le 0xe10 est armé à 5 endroits.
+
+### Craquements audio avec la Switch (HDMI) — piste, statique seulement (2026-11-13)
+- Symptôme (propriétaire) : craquements seulement avec la Switch (dock), aussi en stéréo,
+  notamment à la reprise du son après un silence ; rien en direct sur la télé ; autres
+  sources HDMI saines ; indépendant du port HDMI.
+- Le pilote audio du récepteur HDMI SiI9575 est dans le MCU (chaînes « SiiDrvRxAudio… »).
+  FUN_0809d8f8 (appelée par FUN_080a4b26) = traitement des interruptions audio ; état en
+  `*(*0x0809dccc)` : 1 = audio coupé, 2 = audio établi, 3 = attente (temporisation 600).
+  - Interruption « exception audio » (bit 6 de l'octet 1 lu en 0x17a2) : état -> 1, appel de
+    FUN_0803f91e (prévient l'application : compteur 0x163, FUN_08017a92(1)).
+  - Interruption « audio prêt » (bit 2 de l'octet 0) : FUN_0809ef96(0) (registre 0xf51 bit 0
+    à 0 = démute), trace « === UNMUTE === », état -> 2, **sans délai**.
+- Hypothèse à vérifier sur matériel : la Switch perturbe son flux audio pendant les silences,
+  le SiI coupe puis rétablit, et le rétablissement immédiat laisse passer un transitoire.
+  Diagnostic envisagé : compter les passages « coupé » / « démute » et les exposer par le
+  réseau, pour voir si chaque craquement correspond à un cycle.
+
+### Couleurs du menu à l'écran (OSD) — patch osdgreen (2026-11-13, NON flashé)
+- OSD = moteur du SiI9575, piloté par le MCU. Couleurs sur 6 bits RRGGBB (0x03 bleu, 0x0c vert,
+  0x3f blanc). Registres par fenêtre w (0..3) : 0xe37+16w bordure, 0xe38 séparateur, 0xe39/0xe3a
+  ligne sélectionnée (texte/fond), 0xe3b/0xe3c texte/fond, 0xe3d/0xe3e ligne désactivée,
+  0xe70+w transparence.
+- FUN_08096598 crée une fenêtre depuis une ressource (type 3) : octets +0x15..+0x1c de la
+  ressource = texte, fond, texte sél., fond sél., texte désact., fond désact., bordure,
+  séparateur -> structure de fenêtre sl+0x32..+0x39. FUN_08095774(fenêtre, élément, couleur)
+  = changement à chaud, appelée seulement par la boîte de message FUN_08097458 (bleu 3).
+- Ressources : 4 locales dans le MCU (0x080d2558, identifiants 0x8000..0x8003, 0x1b6 o chacune)
+  et 40 dans le composant OSD du fichier (0x500000, table d'offsets à +0x14), chargées dans la
+  flash du SiI. Bleus utilisés : 0x07 (fond de la ligne sélectionnée, presque toutes les
+  fenêtres), 0x0b (titres : texte « désactivé » des fenêtres 0x04 et 0x26), 0x03 (fenêtre
+  locale 0x8003), 0x1b / 0x16 (bordures des fenêtres 0x0b, 0x10..0x13).
+- Patch (feature `osdgreen`) : le `bl memcpy` de 0x080967dc passe par osd_recolor (cave
+  +0x400, 56 o) qui remplace 0x07->0x08, 0x0b->0x0c, 0x03->0x08, 0x1b->0x1d, 0x16->0x19 ;
+  les deux `movs r2,#3` de la boîte de message (0x0809761e, 0x08097644) deviennent #8.
+  Le composant OSD (>= 0x100000) n'est pas modifié. Image de test : v1.0.6-test.
+
+### Modes surround — lecture et sélection directe (2026-11-13, NON flashé)
+- Table des modes : `0x080d2fe0`, 48 entrées de 12 o : catégorie (0 auto/décodage natif,
+  1 virtuel, 2 stéréo, 3 NSP, 4 film, 5 musique, 6 jeu, 8 autres), pointeur vers la fonction
+  « ce mode est-il possible maintenant ? » (+4), drapeaux (+8).
+- Codes -> nom affiché (FUN_0805b02c) : 0 Virtual Surround, 1 Virtual Surr.2, 2..5 2CH Stereo,
+  6 Dolby Digital, 7 DTS, 8 DTS 96/24, 9 5CH Stereo, 10 Dolby Digital EX, 11 DTS-ES Mtrx,
+  12 DTS-ES Dscrt, 13/17/20 DTS Neo:6 Cinema, 14 7CH Stereo, 15/18 Logic 7 Movie,
+  16 PLII Movie, 19 PLIIx Movie, 21/24 Logic 7 Music, 22 PLII Music, 23/26 Neo:6 Music,
+  25 PLIIx Music, 27/29 Logic 7 Game, 28 PLII Game, 30 PLIIx Game, 31..33 PLIIz,
+  37 TrueHD, 38 Dolby Digital +, 39 DTS-HD MSTR, 40 DTS-HD HI RES, 41 DTS-HD LBR,
+  42 Headphone Bypass, 43 Harman Headphone, 44 Multi-CH PCM, 45 Harman NSP.
+- État : `*0x2000dbf0` pointe la structure audio de la source courante ; +0x11 = mode
+  appliqué, u16 à +0 = réglages mémorisés (3 bits bas = catégorie). Réglages par source :
+  tableau `0x2000abe8`, 0x12 o par source, écrit en mémoire non volatile par FUN_08063e04.
+  Le firmware d'origine mémorise donc déjà un mode par source.
+- FUN_0803a434(mode) : si le validateur du mode répond oui -> FUN_0803b038(mode, 0) :
+  FUN_0803b744 (mémorise pour la source courante) puis FUN_0803394a (pose +0x11 et
+  `0x2000dbec` = entrée de table). C'est la brique qu'utilise le défilement stock
+  (FUN_0803a456 -> FUN_0803abb4).
+- Commande stock `surround-mode` -> FUN_0801fe9c ; gardes : bit 1 de 0x2000ddd4 (allumé),
+  `*0x2000dd5c == 0`, `*0x2000e1ab == 0`, bit 3 de 0x2000ddd4 nul, bit 7 de 0x2000ddcc nul ;
+  puis `*0x2000e1ab = 10`.
+- Patch (feature `surround`) : get-status gagne un 6e champ (mode appliqué) ; nouvelle
+  commande `set-surround <code 0..45>` (cave +0x500, 0x8a o) avec les mêmes gardes, qui
+  appelle FUN_0803a434 ; le push compare aussi le mode (octet +5 de PUSH_RAM).
+  push_tick déplacée à +0x440. Tampon du para porté à 32 o.
+- À établir sur matériel : l'afficheur et l'OSD suivent-ils sans appel explicite à la routine
+  d'affichage (FUN_0801ff88) ; quels codes l'ampli accepte selon la source et le signal.
+
+### Modes surround réellement proposés (lecture du défilement, 2026-11-13)
+- Le défilement (FUN_0803a456) parcourt les catégories 0..6 ; dans une catégorie, la fonction
+  « mode suivant » donne les candidats : a690 virtuel (toujours 0), a696 stéréo (2 -> 3 -> 5 ->
+  9 ou 14), a72e film, a858 musique, a922 jeu. `FUN_0803ca70() != 0` = variantes 7.1 (18..20,
+  24..26, 29..30, 14) ; `FUN_0803fa54() != 0` = PLIIz (31..33).
+- Sur un 5.1 : Auto Select (catégorie 0, mode choisi par FUN_0803b120 selon le signal),
+  Virtual Surround 0, 2CH Stereo 2/3/5, 5CH Stereo 9, Harman NSP 45, film 15/16/17,
+  musique 21/22/23, jeu 27/28. Soit 12 modes + Auto Select.
+- Les formats natifs (6..8, 10..12, 37..41, 44) ne se choisissent pas : c'est Auto Select qui
+  les applique. D'où `set-surround auto` = FUN_0803b038(FUN_0803b120(1), 1), et le 7e champ
+  de get-status (catégorie, 3 bits bas du u16 en tête de la structure audio).
+
+### Dialogue MCU <-> module réseau (statique, 2026-11-13)
+**Transport.** Trames délimitées par 0xC0 (réception octet par octet : FUN_0802ff7c, tampon
+0x2000a2b8, 512 o ; émission : FUN_0802fe46). Contenu d'une requête (FUN_08073984) :
+n° de séquence (2 o, gros-boutiste, 0x2000df82), commande, 1, nœud (4 o), [longueur 2 o +
+données], octet de fin 0xEF (ou somme FUN_08073960 dans un cas de mise à jour).
+
+**Modèle : des « nœuds » 32 bits qu'on lit, écrit, ou auxquels on s'abonne.**
+- 0x00 LIRE -> réponse 0x80 (état, longueur, données) ; 0x04 ÉCRIRE -> 0x84 ; 0x06 activer les
+  notifications -> 0x86 ; 0x01..0x03 / 0x05 listes -> 0x81 / 0x85 ; 0xC6 = notification
+  spontanée (nœud + données) ; 0x87 = annulation.
+- Enveloppes : FUN_08093f0c(nœud, rappel) lire ; FUN_08093f3e(nœud, len, données, rappel)
+  écrire ; FUN_08093f78(nœud, 1, rappel) activer les notifications ; FUN_08073b10(nœud,
+  rappel) enregistrer le rappel de notification (24 abonnements, table 0x2000b490).
+- Requêtes en attente : 20 entrées de 0x18 o à 0x2000a6a8 (compteur 0x2000e0de). À 20, tout
+  nouvel envoi échoue ; FUN_080732b8 vide la table au-delà de 16.
+- Familles vues (138 sites d'appel) : 01xx état/démarrage du module, 05xx, 06xx, 0803xx Wi-Fi,
+  0804xx réseau filaire/IP (08040800 MAC, 08040901..906 adresses), 09xx lecture média
+  (Home Network, vTuner, USB), 0dxx, et **0809xx = port de commande**.
+
+**Port de commande (c'est le MCU qui le fait ouvrir).**
+- 08090100 <- 0x27 0x29 (= 10025) : FUN_08087d9c. Le port n'existe que si cette écriture aboutit.
+- 08090200 : état du client (notification -> `*0x2000e2a8` ; 0 = plus de client, et
+  réactivation des notifications de 08090300 dix tics plus tard). net_bye_bye_push le consulte.
+- 08090300 : données reçues. Une notification arme `*0x2000e2a9 = 10` ; à zéro, si aucune
+  transaction n'est en cours (`*0x2000e2a5 == 0`), LIRE 08090300 (FUN_08087de4) -> rappel
+  FUN_080864b8 -> recopie dans 0x20009eb0 -> FUN_0804ef94 -> cmd_dispatch.
+- 08090400 : données à envoyer (net_send). Aucun identifiant de client : le MCU ne peut pas
+  choisir le destinataire, c'est le module qui décide.
+
+**Séquence d'ouverture : une seule passe, minutée, sans vérification.**
+- FUN_08091698 (compte à rebours `0x2000dfd2`) lit la configuration IP nœud par nœud, puis
+  pose `*0x2000e2a7 = 200`.
+- FUN_08087bd4 (appelée par FUN_08044eb4) décompte `0x2000e2a7` : à 150 écrit le port, à 100
+  active les notifications de 08090200, à 50 celles de 08090300, puis s'arrête. Un accusé
+  (bit 2 de 0x2000de64) fait seulement sauter l'attente.
+- Le rappel d'écriture (0x080866d0) ignore le résultat pour 0809xxxx : aucun nouvel essai.
+  Si l'écriture du port est perdue ou refusée, le port reste fermé jusqu'au prochain
+  redémarrage de la chaîne. Cadence des tics non établie.
+- HYPOTHÈSE pour le « port refusé après flash » (non prouvée, le module est une boîte noire) :
+  un client qui se connecte pendant cette fenêtre, avant que les notifications soient
+  actives, laisse le module et le MCU désaccordés. Cohérent avec les faits : port sain après
+  2,5 min sans y toucher ; port mort quand une connexion a été tentée tôt.
+
+### Wi-Fi : code présent, matériel absent (2026-11-13)
+- Manuel de service (liste de pièces) : carte réseau = FS1230A + contrôleur Ethernet
+  KSZ8851SNL ; seules antennes : Bluetooth (AN1101, module BM840) et AM/FM. Aucune pièce radio
+  Wi-Fi. La notice ne mentionne que la prise réseau filaire.
+- Firmware : assistant réseau complet et relié au reste (FUN_080929e0, état `0x2000e147` ;
+  sous-assistant FUN_08070d00 / FUN_08070fda / FUN_080713e8, état `0x2000e155`) : région WLAN,
+  recherche, liste terminée par [WPS PBC] [Rescan] [Wired] [Manual config], saisie du SSID,
+  type de sécurité, clé, WPS bouton / PIN, filaire ou sans fil, DHCP ou adresses manuelles.
+- Nœuds : 0803xxxx = sans fil (08030401 liste des réseaux, 08030403 connexion, 08030406
+  sécurité, 08030603 DHCP, 08030a00 activation, 08030b00 état) ; 0804xxxx = filaire (08040603
+  DHCP, 08040a00, 08040b00, 08040800 MAC, 08040901..906 adresses) ; 08010000 choix d'interface.
+- Aucun test de modèle vu dans ces fonctions (lecture non exhaustive). Menu visible ou non sur
+  l'AVR 161 : non établi.
+- Vu sur le réseau (ampli allumé) : ports 8080 (rendu DLNA « HK AVR 161 », services
+  AVTransport / ConnectionManager / RenderingControl, pile Intel MicroStack) et 10025 ; port 80
+  fermé bien que 8080 redirige vers http://<ip>/web/index.html.
+
+### API réseau du port 10025 : référence complète (lecture du dispatch, 2026-11-13)
+**Réception (FUN_0804ef94).** Le MCU reçoit au plus 512 octets par lecture (jusqu'au premier
+octet nul). Il coupe après `</harman>`, puis ne regarde QUE les balises fermantes `</name>`,
+`</zone>`, `</para>` : le contenu (31 caractères au plus) est ce qui précède, depuis le `>`
+d'avant. Les en-têtes HTTP sont ignorés. Si plusieurs requêtes arrivent dans la même lecture,
+seule la dernière compte. Résultat dans 0x2000cb1c : nom +0, zone +0x20, para +0x40.
+
+**Portes de cmd_dispatch, dans l'ordre.**
+1. `heart-alive` : réponse immédiate, avant toute porte.
+2. La zone doit commencer par « Main Zone ».
+3. FUN_0802f348 : aucun drapeau « occupé » (0x2000df14 bit 0, e1de, e1dd, dfc0, e1c5, e1c6).
+4. Anti-rebond `*0x2000e2a6 == 0` ; remis à 50 après chaque commande exécutée et décompté par
+   FUN_08044eb4 (tic de FUN_08047360). 50 tics ~ 0,5 s mesurée => **tic de 10 ms**.
+5. FUN_08071816 : si une configuration réseau est en cours, seules les commandes
+   d'alimentation passent.
+
+**Commandes reconnues** (aucune réponse sauf heart-alive ; une commande inconnue est ignorée).
+- Alimentation : `power-on` (FUN_0801899c), `power-off` (FUN_080189b4), `power-toggle`
+  (FUN_08018944).
+- `source-selection` + para : iPod, TV, FM, AM, Disc, Internet Radio, vTuner, Media Server,
+  Server, Cable Sat, USB, Game, AUX, STB, Audio, Radio, Home Network. Reconnus sans effet :
+  Pandora, DVR, Sirius Radio, Source A..D.
+- Volume : `volume-up`, `volume-down`, `mute-on`, `mute-off`, `mute-toggle`.
+- Transport et navigation : `play`, `pause`, `next`, `previous`, `forward`, `reverse`, `up`,
+  `down`, `left`, `right`, `ok`, `back`. Si FUN_080167be() == 1 (source < 8, c.-à-d. une
+  entrée HDMI/analogique, avec `0x2000db00[source] == 0` et `0x2000e190 == 1`), la commande
+  est relayée par FUN_08066f44(code) puis (code | 0x80) : les codes sont ceux des touches
+  HDMI-CEC (0x44 lecture, 0x46 pause, 0x4b/0x4c suivant/précédent, 0x49/0x48 avance/retour,
+  1..4 flèches, 0 validation, 0x0d retour). Sinon, traitement local (menu, lecture USB/réseau).
+- Divers : `options`, `home`, `sleep` (FUN_0801d450), `tone`, `delay` (FUN_0801b816), `rds`
+  (FUN_0801f0e8), `tune-up`, `tune-down`, `channel-up` (FUN_0801ed10), `channel-down`
+  (FUN_0801f15c), `surround-mode` (FUN_0801fe9c).
+- Reconnus sans effet : `setting`, `info`, `audio-effect`, `video-mode`.
+- Ajouts du firmware custom : `get-status`, `set-volume`, `set-surround`,
+  `source-selection` + Bluetooth.
+
+**Réponse (build_reply).** `POST AVR HTTP/1.1`, `Host:<adresse IP sur 12 chiffres>:10025`,
+User-Agent, Content-Length, puis le XML ; zone et para ne sont émis que si le contexte
+0x2000cb1c vaut « status_name ». Tampon de 512 o.
+
+**Non vérifié sur matériel** : `rds`, `delay`, `channel-up/down` ; le relais HDMI-CEC ; la
+requête minimale sans en-têtes HTTP.
+
+### Module réseau : ce qu'on peut en savoir (2026-11-13)
+- **Son logiciel n'est pas dans le fichier .fw.** 0x100000..0x33FFFF = images du DSP Cirrus
+  Logic (« Cirrus Logic, Inc. », version 0.6.5), 0x500000 = ressources OSD ; aucune trace du
+  logiciel du module (FS1230A). Il a sa propre mémoire et sa propre mise à jour (« VENICE
+  UPDATE », « NETWORK UPGRADE » dans les menus). Analyse statique impossible sans ce fichier.
+- **Mesures en boîte noire sur le port 10025** (heart-alive / get-status uniquement) :
+  - **Un seul client.** Une seconde connexion est acceptée et la première est fermée aussitôt
+    (fin de flux côté ancien client). Le dernier connecté gagne ; un push ne peut donc aller
+    qu'à lui.
+  - **Première requête** : envoyée dès la connexion, servie 22 fois sur 42 (quel que soit le
+    temps écoulé depuis la fermeture précédente, 0 à 1 s) ; envoyée 0,1 s ou plus après la
+    connexion, servie 9 fois sur 9. Règle : attendre ~0,3 s après la connexion.
+  - Délai de réponse à heart-alive : ~145 ms ou ~275 ms (deux paliers).
+  - (FAUX, corrigé le 2026-11-14) Une requête sans en-têtes HTTP n'est PAS traitée : l'ampli
+    rejoue alors la commande précédente. Mes sondes n'envoyaient que des heart-alive, d'où
+    l'illusion. Mesure : `volume-up` sans en-têtes après un get-status -> une réponse
+    get-status et aucun changement de volume. Toujours envoyer la requête HTTP complète.
+  - Deux requêtes dans le même envoi : une seule réponse.
+- Port 8080 : rendu DLNA (Intel MicroStack), services AVTransport, ConnectionManager,
+  RenderingControl. Port 80 fermé.
+
+### HDMI-CEC : réception et actions (statique, 2026-11-13)
+- Réception : FUN_08041c18 (appelée par la boucle principale FUN_08010784). Trame dans
+  0x2000d54c : [0] = émetteur << 4 | destinataire, [1] = code, [2..] = paramètres.
+  Adresse logique de l'ampli : `*0x2000e06e` ; adresse physique : 0x2000df6c ; adresses des
+  6 entrées HDMI : table 0x2000d8f0.
+- Codes traités : 0x36 veille, 0x44/0x45 touche appuyée/relâchée (FUN_08041720), 0x46 nom,
+  0x70/0x71/0x72/0x7d mode audio système et état audio, 0x80/0x81 routage, 0x82 source
+  active, 0x83/0x84 adresse physique, 0x85 demande de source active, 0x86 chemin de flux,
+  0x87/0x8c identifiant constructeur, 0x8f état d'alimentation, 0x9e/0x9f version,
+  0xa0 commande constructeur, 0xc0..0xc4 ARC, 0x00 refus, 0xff abandon.
+- Actions : FUN_0802a340(événement), seule porte : bit 0 de 0x2000df14 nul.
+  1/2 mute, 3 allumage (si éteint), **4 veille**, 5/6 volume +/-, 7..12 bascule sur l'entrée
+  HDMI 1..6 (FUN_08029fc2), 0x20 bascule alimentation, 0x21 bascule mute, 0x30 audio TV/ARC
+  (FUN_08019196).
+- **Veille (0x36)**, si diffusée ou adressée à l'ampli, ampli allumé :
+  - bit 0 de 0x2000de40 posé -> FUN_080189b4 (extinction ordinaire) + PB9 et PE1 à 0 ;
+  - sinon -> bit 7 de 0x2000dddc posé, bit 1 de 0x2000dde0 baissé, `0x2000e1dd = 100` :
+    **extinction complète immédiate, sans passer par le sleep ni par la temporisation**.
+  Le patch keepsleep ne couvre donc pas ce chemin : télé éteinte = ampli hors réseau.
+  Site : `movs r0,#4 ; bl 0x0802a340` en 0x08041dce / 0x08041dd0.
+- Bit 0 de 0x2000de40 : posé par FUN_0802addc, baissé par FUN_0802aed0 (avec anti-rebond
+  0x2000de3c). Signification non établie (zone 2 ?).
+- Aucun réglage « CEC activé / désactivé » repéré.
+
+### Ce qui (re)lance l'ouverture du port de commande (statique)
+- Chaîne de comptes à rebours, tic de 10 ms : `0x2000dfd4` (écriture d'une configuration IP
+  manuelle) -> `0x2000dfd6 = 500` -> `0x2000dfd2` (lecture de la configuration IP,
+  FUN_08091698) -> `0x2000e2a7 = 200` (port, FUN_08087bd4).
+- `0x2000dfd2` est armé par FUN_08072a40 (à l'expiration de dfd6 : 202 ou 600), par
+  FUN_08092630 (événement de connexion réseau : 505, 700 ou 1000) et par FUN_08046134 (240).
+  La chaîne n'est donc pas réservée au démarrage : **tout événement de connexion réseau
+  rouvre le port** 5 à 12 s plus tard.
+- Piste à essayer sur un port refusé : débrancher puis rebrancher le câble réseau, au lieu de
+  couper le courant.
+
+### Drapeaux « occupé » de FUN_0802f348 (bloquent commandes réseau ; df14 bloque aussi le CEC)
+- `0x2000df14` bit 0 : accès à une clé USB en cours (posé en 0x080296e6 dans FUN_0802966c,
+  baissé par FUN_080402bc quand l'ouverture de fichier aboutit ; FUN_0808e4f6 = ouverture).
+- `0x2000e1dd` : action d'alimentation différée (100 tics) ; à zéro, FUN_080189b4 si allumé,
+  sinon FUN_08018ca4. Posé par la veille CEC et par l'expiration de la temporisation de sleep.
+- `0x2000e1de` : extinction en cours (100 tics ; à 0x19 FUN_08061844, à zéro FUN_08018ca4).
+- `0x2000dfc0` : défilement des versions à l'écran (FUN_08011cb0 / FUN_08052c98) : MCU, IAP,
+  OSD, DSP, puis VENICE. **La version du module est en RAM à 0x2000d8b8 (16 caractères)**,
+  celle du DSP à 0x2000dc54, celle de l'IAP à 0x2000e1ec.
+- `0x2000e1c5` : temporisation après allumage / extinction / touche OK.
+- `0x2000e1c6` : stabilisation après changement de source (puis FUN_08040574).
+- Tous décomptés par le tic de FUN_0801185c, qui décompte aussi `0x2000e1ab`.
+
+### Séquence d'alimentation : rôle des sorties (schéma, pages 169 et 171 du manuel)
+- MCU IC1401 : PD8 (77) BCO_RST -> POR_N ; PD9 (78) NET_PWR_SW ; PD12 (81) USB_SEL ; PD13/PD14
+  (82/85) HDMI_SDA/SCL ; PD15 (86) HDMI_RST ; PG2 (87) HDMI_MUTE_OUT ; **PG3 (88) PWR_SW1** ;
+  **PG4 (89) PWR_SW2** ; PG5 (90) POWER_HIGH ; **PG6 (91) PWR_SW3** ; PG7/PG8 (92/93) VOL_EN1/2 ;
+  PC6 (96) USB_OE ; PC7/PC8/PC9/PA8 (97..100) afficheur de façade (VFD_CS, CLK, RST, DATA) ;
+  PG9 (124) AMP_VCC_CONT ; PE8 (59) EN_VBUS ; PE9 (60) EN_RX1_PWR ; PE12/PE13 (65/66)
+  HDMI_TX_SW / HDMI_RX_SW ; PA1 (35) CEC.
+- Convertisseurs (page 169) :
+  - IC1201 « SIL9575 +3.3V » et IC1202 (+1,3 V HDMI) : entrée `+7VD` (alimentation
+    principale), EN = PWR_SW1. Alimentent le HDMI et le DSP.
+  - IC1203 : entrée `+7VD`, EN = PWR_SW2 -> USB +5 V.
+  - **IC1205 « Milan +3.3V » (2 A) : entrée `ST+5V` (rail de veille), EN = NET_PWR_SW**, puis
+    IC1206 -> NET_1.2V.
+- Conséquences : en sleep, PWR_SW1 reste à 1 (HDMI alimenté, donc alimentation principale en
+  marche) ; en « éteint », PWR_SW1, PWR_SW2, l'afficheur et NET_PWR_SW passent à 0.
+  Le module réseau ne dépend PAS de l'alimentation principale : un état « éteint mais
+  joignable » est électriquement possible (garder PD9 à 1 et PD8 relâché, ne pas appeler
+  FUN_08011588(1) qui reconfigure des broches). Non essayé.
+
+### HDMI-CEC : émission (statique)
+- Fonctions 0x08040b08..0x08041310 : identifiant constructeur, état d'alimentation
+  (FUN_08040b80), nom OSD (0x47), version CEC, demande de source active (FUN_08040d2e), pings,
+  état audio (FUN_08040dea), mode audio système (FUN_08040e96 / FUN_08040f20), changement de
+  routage (FUN_08041032), adresse physique (FUN_08041310), relais de touches (FUN_08041720).
+- Aucune émission de « veille » (0x36) ni d'« allumage de l'écran » : l'ampli n'éteint ni
+  n'allume la télé de lui-même.
+
+### Patch netoff : module réseau alimenté ampli éteint (2026-11-13, NON flashé)
+- Boucle principale FUN_08010784 : le tic réseau FUN_08047360 tourne quel que soit l'état
+  d'alimentation (seules les mises à jour le suspendent) ; rien n'indique un mode basse
+  consommation du MCU une fois éteint.
+- FUN_08011588(1), appelée à l'extinction complète, passe PC4, PE10 et PE11 en entrée : ce ne
+  sont pas des broches du module (liaison PB12..15, PD8, PD11), on n'y touche pas.
+- Patch (feature `netoff`, 6 octets) : pas 0xc6, `bpl` -> `b` en 0x0801410c (PD9 mis à 1, PD8
+  laissé haut) ; pas 0xaf, `bl gpio_clear(GPIOD, 0x200)` en 0x0801431a remplacé par deux `nop`.
+- Commande `power-full-off` (cave +0x600) : pose le bit 7 de 0x2000dddc, baisse le bit 1 de
+  0x2000dde0 et arme 0x2000e1dd = 100, comme l'ordre de veille CEC ; seulement si l'ampli est
+  allumé ou en sleep. Sert à provoquer l'extinction complète sans attendre ni passer par la télé.
+- Image : v1.2.0-test = v1.1.0-test + netoff.
+- À établir sur matériel : l'ampli éteint répond-il sur 10025 ; `power-on` le rallume-t-il ;
+  consommation ; comportement de l'afficheur et du voyant.
+
+### Rebranchement secteur et module réseau (statique, 2026-11-13)
+- Démarrage (FUN_08065676) : selon l'état mémorisé, soit allumage (`set_src_UNKNOWN_1`), soit
+  mise en veille par `ddd4 |= 2 ; dddc |= 0x80 ; FUN_08018ca4()`, qui arme la séquence à 300
+  (ou 250). Le démarrage en veille déroule donc la MÊME séquence d'extinction complète, pas
+  0xc6 et 0xaf compris.
+- À ce moment PD8 (reset du module) n'a jamais été mis à 1 : seul l'allumage le fait (pas 0xbc).
+  Un patch qui garde seulement PD9 à 1 laisserait le module alimenté mais en reset après un
+  rebranchement, jusqu'au premier allumage.
+- netoff, version corrigée : pas 0xc6 PD9 = 1 ; pas 0xaf (23 pas plus tard) PD8 = 1 à la place
+  de PD9 = 0 (`mov.w r1,#0x100` en 0x08014312, `bl gpio_set` en 0x0801431a). À l'allumage
+  d'origine l'écart entre alimentation et sortie de reset n'est que de 2 pas.
+
+### Essais sur matériel de la v1.1.0-test (2026-11-14)
+- Flash puis 2 min 30 sans toucher au port : `get-status` = `110,0,2,1.1.0-test,1,45,0`.
+- **Push** : `volume-up` -> message spontané `112,...` dans les 3 s ; `volume-down` -> `110,...` ;
+  rien pendant 5 s sans changement. Validé pour le volume.
+- **Surround** (source MHL, signal stéréo, Auto Select = Harman NSP) : acceptés 0, 5 (2CH),
+  9, 45, 16, 17, 22, 23, 28 ; refusés Logic 7 Movie / Music / Game (15/18, 21/24, 27/29) et
+  Dolby TrueHD (37) ; `set-surround auto` ramène en Auto Select. Une commande envoyée moins
+  d'une seconde après la précédente est ignorée (anti-rebond).
+- **Mute : bug trouvé.** `mute-on` ne changeait rien au champ mute. Le vrai indicateur est le
+  bit 4 de `0x2000dddc` (basculé par FUN_0801b030) ; le bit 1 de `0x2000de40`, lu depuis la
+  v1.0.0, est autre chose. De plus `mute-on`, `mute-off` et `mute-toggle` appellent tous la
+  même bascule dans le firmware d'origine.
+  Corrigé dans le constructeur (non flashé) : lecture du bon bit, et feature `mute` qui
+  n'envoie `mute-on` / `mute-off` à la bascule que si l'état doit changer.
+- Non vérifié : OSD vert (à regarder à l'écran), push du mute, de la source, de
+  l'alimentation et du surround.
+- Suite des essais v1.1.0-test (2026-11-14) : OSD vert confirmé à l'écran par le propriétaire.
+  Push mesuré, délai entre la commande et le message spontané : surround 0,7 s (22 puis auto),
+  source 0,6 à 0,9 s (Disc puis MHL), mise en veille 2,5 s (champ alimentation à 0), allumage
+  1,1 s. Mute : aucun message, comme attendu avec le mauvais indicateur de cette image.
