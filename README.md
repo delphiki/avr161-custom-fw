@@ -23,7 +23,7 @@ targets the STM32 MCU (code caves + detours in the rewritten flash region).
 | # | Feature | Implemented | Validated on hardware |
 |---|---------|:-----------:|:---------------------:|
 | 1  | `get-status` — real-time volume / mute / source | ✅ | ✅ |
-| 2  | `set-volume` — absolute volume (0–180) | ✅ firmware¹ | ⏳ in progress |
+| 2  | `set-volume` — absolute volume (0–180) | ✅ firmware¹ | ✅ (v1.0.4) |
 | 3  | Direct Bluetooth source select | ✅ | ✅ |
 | 4  | Push state on change (Home Assistant without polling) | ⬜ planned | — |
 | 5  | Configurable power-on source + volume | ⬜ planned | — |
@@ -34,8 +34,14 @@ targets the STM32 MCU (code caves + detours in the rewritten flash region).
 | 12 | Per-input level trim | ⬜ planned | — |
 | 27 | ~~Zone 2~~ | ❌ dropped | hardware-impossible (single NJU72340 feeds all channels) |
 
-¹ `set-volume` reuses the proven volume-up/down path (re-entrant dispatch). A client-side
-fallback (reads `get-status`, steps volume-up/down) is implemented and validated in `ampli.py`.
+¹ One network command, one jump, lands exactly on the target: the handler writes the master
+volume to `target ± step` (it predicts whether the firmware will step by 2 or 4), then issues a
+single synthesized `volume-up`/`volume-down` through the stock dispatcher so the stock path
+applies it to the hardware and the OSD. If the stock step is refused (guards, or the
+dispatcher's post-command cooldown) the original volume is restored. Near the 0/180 limits it
+can end one step away. Works from **v1.0.4**; in v1.0.0–v1.0.2d the command was silently
+inoperative (see *Known issues*). `ampli.py` falls back to stepping volume-up/down on older
+firmware.
 ² A native `surround-mode` command already exists over the API, but it **cycles** modes (the
 `para` is ignored). Feature 11 would add reading the current mode and direct selection.
 
@@ -79,11 +85,26 @@ docs/superpowers/
    by reading the heart-alive reply's User-Agent (`Harman PATCH1…`), then back to stock
    (`Harman Kardon…`). **The custom-flash ↔ stock-restore cycle is proven over USB.**
 7. **Patch #1** — get-status, set-volume, direct Bluetooth (detour on `cmd_dispatch` + cave).
-   get-status and Bluetooth are **hardware-validated** (heart-alive intact,
-   `<para>vol,mute,src</para>`).
+   All three are **hardware-validated** (heart-alive intact, `<para>vol,mute,src,fw</para>`).
+   The cave code is also exercised by **emulation tests** (Unicorn runs the real patched
+   image; `firmware/patches/tests/emu.py`).
 8. **Client** — `ampli.py` extended (`status`, `set-volume`, direct `source bluetooth`).
 
 Full technical detail: `firmware/re/NOTES.md`.
+
+### Known issues
+
+- **v1.0.0 – v1.0.2d: `set-volume` never ran.** A cave layout bug let `"source-selection"`
+  overwrite the end of `"set-volume"`, so the command never matched and fell through to the
+  stock dispatcher as an unknown command. Fixed in v1.0.2; the builder now refuses overlapping
+  cave writes.
+- **v1.0.3 (never released): dead network service at boot.** Same algorithm as v1.0.4 in a
+  larger routine — the first build to occupy cave offsets `+0x320..+0x333`. Port 10025 refused
+  connections on three boots; re-flashing v1.0.2 fixed it and the compacted v1.0.4 is healthy.
+  **The cause is not understood.** Until it is, a test keeps `set_volume` within the proven
+  footprint, and any growth of the cave should be validated on hardware.
+- The stock dispatcher ignores a command that arrives within roughly half a second of the
+  previous handled one (cooldown). `ampli.py` re-sends `set-volume` when that happens.
 
 ---
 
@@ -95,7 +116,7 @@ Full technical detail: `firmware/re/NOTES.md`.
 ### Prepare the USB stick
 1. **FAT32** stick, clean root.
 2. Copy the image to the root, **named exactly** `AVR1610_USB(V002_20).fw`:
-   - **custom** firmware: `firmware/patches/out/AVR1610_patch1.fw`
+   - **custom** firmware: `firmware/patches/out/AVR1610_patch1_v<version>.fw` (or the release asset)
    - **stock** firmware (recovery): `firmware/AVR1610_USB(V002_20).fw`
 
    (on macOS: `diskutil eraseDisk FAT32 AVRUPDATE MBRFormat /dev/diskN`, then
@@ -123,8 +144,8 @@ that would break early boot (not the case for these network features), keep an *
 ./ampli.py source <name>        # e.g. TV, Disc, "Cable Sat", bluetooth
 ./ampli.py raw surround-mode    # cycle to the next surround mode (native command)
 # --- custom firmware (patch #1) only ---
-./ampli.py status               # volume (dB) | mute | source
-./ampli.py set-volume <0-180>   # absolute volume  (or: set-volume -25db)
+./ampli.py status               # volume (dB) | mute | source | firmware version
+./ampli.py set-volume <0-180>   # absolute volume, single jump (or: set-volume -25db)
 ./ampli.py source bluetooth     # direct Bluetooth select
 ```
 

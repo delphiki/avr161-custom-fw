@@ -17,6 +17,12 @@ version (`V002.20`). The version is the single source of truth in `build_patch1.
 - **PATCH** — fix with no feature/API change.
 
 `v1.0.0` = patch #1 (get-status, set-volume, direct Bluetooth).
+`v1.0.4` = first version with a working `set-volume` (exact target, single jump). v1.0.1–v1.0.3
+were hardware-test builds and were never released.
+
+Before releasing, run the hardware smoke test on a freshly flashed amp: `./ampli.py version`,
+`./ampli.py status`, a few `./ampli.py set-volume <n>` in both directions, and confirm the
+control port still accepts connections after a cold boot.
 
 ## Cut a release
 

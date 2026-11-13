@@ -7,10 +7,13 @@ Usage :
     ampli.py toggle                bascule allumé/éteint (marche aussi depuis la veille)
     ampli.py vol+ [n] | vol- [n]   monte / baisse le volume de n crans (défaut 1)
     ampli.py mute [on|off]         coupe/remet le son ; sans argument = bascule
-    ampli.py source <nom>          change de source (ex. TV, Disc, MHL, "Cable Sat")
-                                   bluetooth est la seule à passer par le menu de
-                                   l'ampli (une dizaine de secondes) ; l'ampli n'a
-                                   pas de commande directe pour cette source.
+    ampli.py source <nom>          change de source (ex. TV, Disc, MHL, "Cable Sat",
+                                   Bluetooth — direct avec le firmware custom)
+    ampli.py status                volume / mute / source / version (firmware custom)
+    ampli.py set-volume <n|NdB>    volume absolu 0-180 ou en dB (ex. -25db) ; une seule
+                                   commande avec le firmware custom >= 1.0.4, sinon
+                                   boucle de pas côté client
+    ampli.py version               version du firmware custom
     ampli.py raw <commande> [para] envoie une commande brute (voir COMMANDS)
 
 La liste des sources et des commandes vient du décompilage de l'appli officielle
@@ -42,9 +45,9 @@ SOURCES = ["TV", "Disc", "Cable Sat", "DVR", "Server", "Radio", "AUX", "Game",
 # Noms pratiques -> valeur `para` réelle (l'afficheur montre d'autres libellés).
 ALIASES = {"mhl": "Media Server", "set-top box": "STB"}
 
-# L'ampli n'a AUCUNE commande directe pour le Bluetooth (l'appli officielle non
-# plus : onSourceBluetoothClick n'existe que pour les barres de son BDS). On
-# l'atteint en naviguant dans le menu : home > Source Select > flèches > ok.
+# Le firmware STOCK n'a aucune commande directe pour le Bluetooth (l'appli officielle
+# non plus) ; le firmware custom en ajoute une (source-selection Bluetooth). Repli stock :
+# naviguer dans le menu : home > Source Select > flèches > ok.
 # La liste « Source Select » fait 15 lignes, s'ouvre sur la première et boucle,
 # donc un seul « haut » mène à Bluetooth (dernière ligne).
 MENU_SOURCES = {"bluetooth": 14}
@@ -53,7 +56,7 @@ MENU_OPEN_DELAY = 3.0   # temps d'ouverture du menu puis de la liste
 MENU_STEP_DELAY = 1.0   # pause entre deux touches : plus vite, l'ampli en perd
 
 # Commandes brutes connues (nom envoyé dans <name>), issues de CommandSetAvr.
-# get-status / set-volume ne sont dispo qu'avec le firmware CUSTOM (patch #1).
+# get-status / set-volume ne sont dispo qu'avec le firmware CUSTOM (patch #1 ; set-volume >= 1.0.4).
 RAW_COMMANDS = ["power-on", "power-off", "power-toggle", "sleep",
                 "volume-up", "volume-down", "mute-toggle", "mute-on", "mute-off",
                 "play", "pause", "next", "previous", "forward", "reverse",
@@ -75,6 +78,25 @@ def parse_status(para):
     if fw:
         d["fw"] = fw          # version du firmware custom (patch >= v1.0.0)
     return d
+
+
+SETVOL_FW_MIN = (1, 0, 4)   # 1re version dont la commande firmware set-volume est validée
+FW_TRIES = 3                # envois max de la commande firmware (l'ampli ignore une commande
+FW_RETRY_DELAY = 0.7        # arrivant < ~0,5 s après la précédente : cooldown du dispatch)
+
+
+def fw_at_least(fw, minimum):
+    """True si la version firmware `fw` ('1.0.4', '1.0.2d'…) est >= `minimum` (tuple)."""
+    import re
+    if not fw:
+        return False
+    parts = []
+    for comp in fw.split("."):
+        m = re.match(r"\d+", comp)
+        if not m:
+            return False
+        parts.append(int(m.group()))
+    return tuple(parts) >= tuple(minimum)
 
 
 # Échelle volume interne 0..180 (~0,5 dB/pas) <-> dB (-80..+10 dB, 0 dB à l'index 160).
@@ -131,6 +153,28 @@ class Ampli:
             self.send(key)
             time.sleep(MENU_STEP_DELAY - STEP_DELAY)
         self.send("ok")
+
+    def set_volume(self, target):
+        """Règle le volume à une valeur absolue (0..180). Firmware custom >= 1.0.4 : UNE
+        commande `set-volume` (saut direct, pile sur la cible), renvoyée si l'ampli l'a
+        ignorée (cooldown). Sinon, ou si elle ne prend pas : boucle de pas côté client."""
+        target = max(0, min(180, int(target)))
+        st = self.get_status()
+        if st is None:
+            return None
+        if st["vol"] == target:
+            return target
+        if fw_at_least(st.get("fw"), SETVOL_FW_MIN):
+            for attempt in range(FW_TRIES):
+                if attempt:
+                    time.sleep(FW_RETRY_DELAY)
+                self.send("set-volume", str(target))
+                st = self.get_status()
+                if st is None:
+                    return None
+                if st["vol"] == target:
+                    return target
+        return self.set_volume_absolute(target)
 
     def set_volume_absolute(self, target, max_steps=120):
         """Règle le volume à une valeur absolue (0..180), côté client : lit get-status
@@ -217,11 +261,11 @@ def main(argv):
                 return 1
         elif cmd in ("set-volume", "setvol"):
             if not args:
-                print("Usage : ampli.py set-volume <0-180 | NdB>  (nécessite get-status)", file=sys.stderr)
+                print("Usage : ampli.py set-volume <0-180 | NdB>  (nécessite le firmware custom)", file=sys.stderr)
                 return 2
             a = args[0].lower()
             n = db_to_internal(float(a[:-2])) if a.endswith("db") else int(a)
-            res = amp.set_volume_absolute(n)
+            res = amp.set_volume(n)
             if res is None:
                 print("set-volume impossible (get-status sans réponse — firmware custom requis).",
                       file=sys.stderr)
