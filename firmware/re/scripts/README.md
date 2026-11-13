@@ -4,7 +4,9 @@ Scripts de rétro-ingénierie utilisés pendant la session. Les conclusions qu'i
 produisent sont consignées dans **`../NOTES.md`** (c'est la référence ; ces scripts
 sont les outils qui l'ont alimentée et permettent de tout rejouer).
 
-Cible analysée : `../../AVR1610_USB(V002_20).fw` (chemin relatif codé dans les scripts).
+Cible analysée : `../../AVR1610_USB(V002_20).fw`. Les scripts déduisent ce chemin (et celui du
+projet Ghidra `../../ghidra`) de leur propre emplacement : ils se lancent depuis n'importe quel
+dossier. Pour viser d'autres fichiers, définir `AVR161_FW` et/ou `AVR161_GHIDRA_DIR`.
 
 ## ⚙️ Environnements requis (À RECRÉER)
 

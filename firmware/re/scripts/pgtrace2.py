@@ -1,7 +1,9 @@
 import struct
 from capstone import Cs, CS_ARCH_ARM, CS_MODE_THUMB, CS_MODE_LITTLE_ENDIAN
 from capstone.arm_const import ARM_OP_MEM, ARM_REG_PC
-FW="/Users/julienvilletorte/PersonnalProjects/ampli/firmware/AVR1610_USB(V002_20).fw"
+import os as _os  # chemins déduits de l'emplacement du script ; surcharge : AVR161_FW / AVR161_GHIDRA_DIR
+_FW_DIR=_os.path.normpath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'../..'))
+FW=(_os.environ.get("AVR161_FW") or _os.path.join(_FW_DIR,"AVR1610_USB(V002_20).fw"))
 BASE=0x08000000; D=open(FW,"rb").read()
 md=Cs(CS_ARCH_ARM, CS_MODE_THUMB|CS_MODE_LITTLE_ENDIAN); md.detail=True
 def off(va): return va-BASE

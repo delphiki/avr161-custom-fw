@@ -2,7 +2,9 @@ import pyghidra
 pyghidra.start()
 from ghidra.base.project import GhidraProject
 from ghidra.program.model.symbol import SourceType
-proj=GhidraProject.openProject("/Users/julienvilletorte/PersonnalProjects/ampli/firmware/ghidra","AVR161",True)
+import os as _os  # chemins déduits de l'emplacement du script ; surcharge : AVR161_FW / AVR161_GHIDRA_DIR
+_FW_DIR=_os.path.normpath(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)),'../..'))
+proj=GhidraProject.openProject((_os.environ.get("AVR161_GHIDRA_DIR") or _os.path.join(_FW_DIR,"ghidra")),"AVR161",True)
 prog=proj.openProgram("/","AVR1610_USB(V002_20).fw",False)  # writable
 fm=prog.getFunctionManager(); st=prog.getSymbolTable(); sp=prog.getAddressFactory().getDefaultAddressSpace()
 def A(x): return sp.getAddress(x)
