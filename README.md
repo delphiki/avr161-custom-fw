@@ -22,9 +22,9 @@ targets the STM32 MCU (code caves + detours in the rewritten flash region).
 
 | # | Feature | Implemented | Validated on hardware |
 |---|---------|:-----------:|:---------------------:|
-| 1  | `get-status` — real-time volume / mute / source | ✅ | ✅ |
+| 1  | `get-status` — real-time volume / mute / source / firmware version | ✅ | ✅ |
 | 2  | `set-volume` — absolute volume (0–180) | ✅ firmware¹ | ✅ (v1.0.4) |
-| 3  | Direct Bluetooth source select | ✅ | ✅ |
+| 3  | Direct Bluetooth source select | ✅ | ✅ (re-checked on v1.0.4) |
 | 4  | Push state on change (Home Assistant without polling) | ⬜ planned | — |
 | 5  | Configurable power-on source + volume | ⬜ planned | — |
 | 6  | Volume ceiling (max / at power-on) | ⬜ planned | — |
@@ -39,19 +39,49 @@ volume to `target ± step` (it predicts whether the firmware will step by 2 or 4
 single synthesized `volume-up`/`volume-down` through the stock dispatcher so the stock path
 applies it to the hardware and the OSD. If the stock step is refused (guards, or the
 dispatcher's post-command cooldown) the original volume is restored. Near the 0/180 limits it
-can end one step away. Works from **v1.0.4**; in v1.0.0–v1.0.2d the command was silently
-inoperative (see *Known issues*). `ampli.py` falls back to stepping volume-up/down on older
-firmware.
+can end one step away. Works from **v1.0.4**; in the released v1.0.0 the routine is present
+but unreachable (see *Firmware releases*). `ampli.py` falls back to stepping volume-up/down on
+older firmware.
 ² A native `surround-mode` command already exists over the API, but it **cycles** modes (the
 `para` is ignored). Feature 11 would add reading the current mode and direct selection.
 
 Patch #1 ships features **1, 2, 3**. Remaining selected features: **4, 5, 6, 9, 10, 11, 12**.
 
+## Firmware releases — exact contents
+
+Both released images are the stock V002.20 file (6,291,456 bytes) with bytes changed **only**
+in the MCU application region: a 4-byte detour and a code cave. The resident bootloader
+(`< 0x10000`) and the other components in the file (`≥ 0x100000`, DSP etc.) are byte-identical
+to stock. Facts below were read back from the published release assets.
+
+| | **v1.0.0** | **v1.0.4** (current) |
+|---|---|---|
+| SHA-256 | `b29910b3…0bd4` | `2f0df184…a672` |
+| Bytes changed vs stock | 618 | 641 |
+| Detour | `0x0804F328` (`cmd_dispatch` entry): `b.w 0x080E0180` | same |
+| `get-status` | ✅ replies `vol,mute,src,1.0.0` | ✅ replies `vol,mute,src,1.0.4` (same routine, byte-identical) |
+| `source-selection` + `Bluetooth` | ✅ direct Bluetooth | ✅ same handler, byte-identical |
+| `set-volume` | ❌ **inoperative**: 130-byte routine present (loop of up to 128 re-entrant volume steps) but unreachable — the command string in the image reads `set-volusource-selection`, so the command is passed to the stock dispatcher, which ignores it | ✅ 150-byte single-shot routine, lands exactly on the target |
+| Hardware validation | get-status, Bluetooth | get-status, Bluetooth, set-volume (16/16 targets exact), control port healthy after cold boot |
+
+`get-status` reply fields: `vol` is the master volume 0–180 (dB = −80 + 0.5 × vol), `mute` is
+0/1, `src` is the firmware's internal source number in decimal (observed: 2 = MHL, 9 = Game,
+17 = Bluetooth), then the custom firmware version.
+
+Cave layout in v1.0.4 (offsets from `0x080E0000`): strings `get-status` +0x000, `,` +0x010,
+`set-volume` +0x018, `source-selection` +0x024, `Bluetooth` +0x035, version +0x3C0; routines
+`emit_status` +0x040 (276 bytes), dispatcher +0x180 (112 bytes, including the relocated 4-byte
+prologue and the jump back), `set_volume` +0x280 (150 bytes), Bluetooth handler +0x340
+(44 bytes). In v1.0.0 `source-selection` was at +0x020 and `Bluetooth` at +0x032 — the overlap
+with `set-volume` (11 bytes at +0x018) is the bug.
+
+v1.0.1, v1.0.2, v1.0.2d and v1.0.3 were hardware-test builds and were never released.
+
 ## Repository layout
 
 ```
 ampli.py                         network control tool (+ get-status / set-volume)
-tests/                           client tests (parsing, dB mapping)
+tests/                           client tests (parsing, dB mapping, set-volume logic)
 firmware/
   AVR1610_USB(V002_20).fw        STOCK firmware V002.20 (6 MiB) — recovery image
   re/NOTES.md                    the whole reverse engineering (justified addresses)
@@ -61,7 +91,7 @@ firmware/
     DESIGN-patch1.md             patch #1 design document
     build_patch1.py              builds the patched image (keystone + capstone)
     patchlib.py / verifylib.py   build + static-verification harness
-    tests/                       patch static tests
+    tests/                       patch tests: static (disassembly) + emulation (emu.py, Unicorn)
     testA-result.md              USB recovery proof (Test A)
     out/                         generated images (git-ignored)
 docs/superpowers/
@@ -76,7 +106,8 @@ docs/superpowers/
    `build_reply` / `net_send`, state variables (volume / mute / source), source-switch
    functions including `set_src_Bluetooth`.
 3. **Updater dissection** — `.fw` format, the IAP flash state machine, layout tables.
-   Findings: the image is **unsigned, not checksummed** (written verbatim); the MCU is
+   Findings: the image is **unsigned, not checksummed** (written verbatim, each word read back
+   after programming; three failed attempts and the updater halts); the MCU is
    **1 MB**; a **code cave at `0x080E0000`** sits in the rewritten region. The resident
    boot-time update path was analysed → USB recovery **without SWD** is possible.
 4. **Design & plan** — `DESIGN-patch1.md` (reviewed by a fresh "builder" agent) + a TDD plan.
@@ -94,10 +125,11 @@ Full technical detail: `firmware/re/NOTES.md`.
 
 ### Known issues
 
-- **v1.0.0 – v1.0.2d: `set-volume` never ran.** A cave layout bug let `"source-selection"`
-  overwrite the end of `"set-volume"`, so the command never matched and fell through to the
-  stock dispatcher as an unknown command. Fixed in v1.0.2; the builder now refuses overlapping
-  cave writes.
+- **v1.0.0 (and test builds up to v1.0.2d): `set-volume` never ran.** A cave layout bug let
+  `"source-selection"` overwrite the end of `"set-volume"`, so the command never matched and
+  fell through to the stock dispatcher as an unknown command. Fixed in the released v1.0.4
+  (first fixed in the unreleased test build v1.0.2); the builder now refuses overlapping cave
+  writes.
 - **v1.0.3 (never released): dead network service at boot.** Same algorithm as v1.0.4 in a
   larger routine — the first build to occupy cave offsets `+0x320..+0x333`. Port 10025 refused
   connections on three boots; re-flashing v1.0.2 fixed it and the compacted v1.0.4 is healthy.
@@ -155,15 +187,16 @@ Amp address: `AMPLI_HOST` environment variable (default `192.168.1.58`).
 
 ```bash
 cd firmware/patches
-python3 -m venv .venv && ./.venv/bin/pip install keystone-engine capstone "setuptools<81" pytest
+python3 -m venv .venv && ./.venv/bin/pip install keystone-engine capstone unicorn "setuptools<81" pytest
 # (keystone needs its native lib: brew install keystone)
-./.venv/bin/python -m pytest -q                     # static tests
-./.venv/bin/python -c "import patchlib; from build_patch1 import build_patch1; \
-  patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth'}), 'out/AVR1610_patch1.fw')"
+./.venv/bin/python -m pytest -q                     # static + emulation tests
+./.venv/bin/python -c "import patchlib; from build_patch1 import build_patch1, FW_VERSION; \
+  patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth'}), f'out/AVR1610_patch1_v{FW_VERSION}.fw')"
 ```
 
 The patch only adds/changes the rewritten region (`0x10000–0xFFFFF`): a 4-byte detour on
 `cmd_dispatch` + a code cave at `0x080E0000`. The image is the **same size, 1:1** with stock.
+The build is reproducible: building the `v1.0.4` tag yields the release asset's SHA-256.
 
 ---
 
