@@ -337,3 +337,62 @@ Seule différence structurelle : v1.0.3 est le 1er build à occuper +0x320..+0x3
 Hypothèse NON PROUVÉE : quelque chose lit cette zone. Contournement : v1.0.4 = même algorithme
 compacté à 0x96 octets (aucun octet modifié hors empreinte v1.0.2), test de garde ajouté.
 Si v1.0.4 échoue aussi : c'est le contenu et non l'empreinte -> revenir à v1.0.2.
+
+## Sleep -> extinction complète, alimentation, push (2026-11-13)
+
+### Mesure matériel (surveillance passive d'une nuit)
+- `power-off` à 02:29:32 -> « Device sleep » ; ping + port 10025 + heart-alive OK jusqu'à 03:14.
+- 03:29:43 (t+60 min) : ping perdu, port en timeout, plus d'ARP. Plus rien jusqu'à 11:30.
+- Des `heart-alive` toutes les 15 min n'empêchent pas l'extinction. Wake-on-LAN (paquets
+  magiques UDP 7/9/40000 en diffusion) sans effet. Éteint : voyant allumé, afficheur vide,
+  la télécommande rallume.
+
+### Temporisation sleep -> éteint
+- Compteur `0x2000dd7c` (u32), armé à `0xe10` (3600) à 5 endroits (`mov.w r1,#0xe10`) :
+  0x08018974 (FUN_08018944, power-toggle), 0x080189f0 (FUN_080189b4, power-off),
+  0x08012e48, 0x08031d2c, 0x08032cb2 ; remis à 0 dans FUN_08018a3c (power-on).
+- Décompte : bloc « tick 1 s » de FUN_08010784 (boucle principale, appelée par FUN_08010184
+  <- main FUN_08065676), 0x08010af6..0x08010b3f, gardé par le bit 0 de 0x2000ddd4.
+  À zéro : bit 7 de `0x2000dddc` levé (= éteint complètement ; c'est lui qui retire
+  « Device sleep » de l'afficheur, cf. FUN_08052258), bit 1 de 0x2000dde0 baissé,
+  0x2000e1dd = 100.
+- FUN_08012bc8 (extinction auto) peut lever le même bit 7 directement si le bit 2 de
+  0x2000ddf4 est posé (réglage non identifié).
+- Patch keepsleep (v1.0.5) : `beq` -> `b` à 0x08010afe ; le compteur ne s'écoule plus.
+  NON VALIDÉ sur matériel à cette date.
+
+### Alimentation
+- Bit 1 de `0x2000ddd4` = allumé (0 en sleep). Exposé en 5e champ de get-status (v1.0.5).
+
+### Table des sources (routine d'affichage FUN_08052f80, variable 0x2000e1ae)
+0 CABLE/SAT, 1 DISC, 2 MHL (Roku/Server), 3 AUX, 4 GAME, 5 SET-TOP BOX, 6 AUDIO, 7 TV,
+8-9 (FUN_08059a10, radio ?), 10 USB, 11 iPod, 12 HOME NETWORK, 13 vTuner, 16 Home Network
+DMR, 17 BLUETOOTH. Vérifié sur matériel : 2 et 17 seulement. (ampli.py dit 0x10 = USB : à
+trancher.)
+
+### Réseau : module externe, pas le MAC du STM32
+- Aucune référence aux registres ETH du STM32 (0x40028000…) dans le firmware.
+- `net_send(buf)` (0x08087e0c) -> FUN_08093f3e(0x08090400, len, buf, …) -> FUN_08073984 :
+  construit une trame série vers le module réseau (n° de séquence 2 o, type, 1, identifiant
+  4 o `0x08090400`, longueur, données, octet de fin 0xEF ou somme), l'émet (FUN_0802fe46)
+  puis attend l'accusé (FUN_080730d4). Le routage vers le(s) client(s) TCP est fait par le
+  module : inconnu statiquement.
+- Réception : FUN_080864b8 (rappel enregistré par pointeur en 0x08087d90 / 0x08087ec4)
+  recopie la requête puis appelle FUN_0804ef94 -> cmd_dispatch.
+- Le firmware stock pousse déjà un message non sollicité : `net_bye_bye_push` (0x080718d8,
+  appelée par src_switch_by_index) fait build_reply("bye-bye",0,0) + net_send.
+
+### Carte mémoire vive (table d'init IAR 0x080d6c90)
+- .data 0x20000000..0x20000f82 ; .bss 0x20000f84..0x2000e2dc ; pile jusqu'à 0x2000f2e0
+  (SP initial). Aucune référence réelle au-dessus : 0x2000f2e0..0x2001ffff libre (non
+  initialisé au démarrage).
+
+### Push (build de test v1.1.0-test, NON flashé)
+- Le bloc du décompte, mort avec keepsleep, est remplacé à 0x08010af6 par
+  `bl push_tick ; b 0x08010b40`. push_tick (cave +0x200) compare (vol, mute|pwr<<1, src) à
+  l'instantané mémorisé à `0x2001ff00` (+3 = 0xA5 si valide, +4 = compteur « client
+  vivant » en secondes) et appelle emit_status si ça a changé et que le compteur est > 0.
+- Chaque commande reçue (entrée du dispatch du cave) réarme le compteur à 90 s.
+- Occupe pour la première fois le cave entre +0x1f0 et +0x279 (cf. mystère v1.0.3).
+- À établir sur matériel : à quel client part un message non sollicité quand plusieurs sont
+  connectés ; comportement si le client s'est déconnecté pendant les 90 s.

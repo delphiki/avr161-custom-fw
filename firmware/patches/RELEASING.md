@@ -5,7 +5,7 @@ version (`V002.20`). The version is the single source of truth in `build_patch1.
 (`FW_VERSION`) and is:
 
 - **embedded in the firmware** — returned as the 4th field of `get-status`
-  (`vol,mute,src,<version>`), so a flashed amp self-identifies over the network
+  (`vol,mute,src,<version>,<pwr>`), so a flashed amp self-identifies over the network
   (`./ampli.py version`);
 - used to **name the release artifact** (`AVR1610_patch1_v<version>.fw`);
 - used as the **git tag** and **GitHub release** name (`v<version>`).
@@ -19,6 +19,8 @@ version (`V002.20`). The version is the single source of truth in `build_patch1.
 `v1.0.0` = patch #1 (get-status, set-volume, direct Bluetooth).
 `v1.0.4` = first version with a working `set-volume` (exact target, single jump). v1.0.1–v1.0.3
 were hardware-test builds and were never released.
+`v1.0.5` = power state in `get-status`, and the amp no longer leaves the network after an hour
+in sleep.
 
 Before releasing, run the hardware smoke test on a freshly flashed amp: `./ampli.py version`,
 `./ampli.py status`, a few `./ampli.py set-volume <n>` in both directions, and confirm the
@@ -35,7 +37,7 @@ cd firmware/patches
 ./.venv/bin/python -m pytest -q
 V=$(./.venv/bin/python -c "import build_patch1 as b; print(b.FW_VERSION)")
 ./.venv/bin/python -c "import patchlib; from build_patch1 import build_patch1, FW_VERSION; \
-  patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth'}), \
+  patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth','keepsleep'}), \
   f'out/AVR1610_patch1_v{FW_VERSION}.fw')"
 
 # 3. commit, tag, push

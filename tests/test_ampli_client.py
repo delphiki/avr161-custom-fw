@@ -6,7 +6,7 @@ def test_parse_status_reply():
 
 
 def test_parse_status_muted_unknown_source():
-    assert ampli.parse_status("110,1,2") == {"vol": 110, "mute": True, "source": "2"}
+    assert ampli.parse_status("110,1,15") == {"vol": 110, "mute": True, "source": "15"}
 
 
 def test_db_mapping_bounds():
@@ -101,3 +101,24 @@ def test_set_volume_clamps_target():
 def test_set_volume_noop_when_already_there():
     a = FakeAmp(90, fw="1.0.4")
     assert a.set_volume(90) == 90 and a.sent == []
+
+
+# --- get-status : 5e champ = alimentation (firmware >= v1.0.5) ---
+
+def test_parse_status_with_power_on():
+    assert ampli.parse_status("90,0,17,1.0.5,1") == {
+        "vol": 90, "mute": False, "source": "Bluetooth", "fw": "1.0.5", "power": True}
+
+
+def test_parse_status_with_power_sleep():
+    assert ampli.parse_status("90,0,17,1.0.5,0")["power"] is False
+
+
+def test_parse_status_without_power_field_has_no_power_key():
+    assert "power" not in ampli.parse_status("90,0,17,1.0.4")
+
+
+def test_source_codes_verified_on_hardware():
+    names = {0: "Cable Sat", 2: "MHL", 4: "Game", 7: "TV", 8: "AM", 9: "FM", 10: "USB", 17: "Bluetooth"}
+    for code, name in names.items():
+        assert ampli.parse_status(f"90,0,{code}")["source"] == name

@@ -9,7 +9,8 @@ Usage :
     ampli.py mute [on|off]         coupe/remet le son ; sans argument = bascule
     ampli.py source <nom>          change de source (ex. TV, Disc, MHL, "Cable Sat",
                                    Bluetooth — direct avec le firmware custom)
-    ampli.py status                volume / mute / source / version (firmware custom)
+    ampli.py status                alimentation (firmware >= 1.0.5) / volume / mute / source /
+                                   version (firmware custom)
     ampli.py set-volume <n|NdB>    volume absolu 0-180 ou en dB (ex. -25db) ; une seule
                                    commande avec le firmware custom >= 1.0.4, sinon
                                    boucle de pas côté client
@@ -65,18 +66,23 @@ RAW_COMMANDS = ["power-on", "power-off", "power-toggle", "sleep",
                 "source-selection", "heart-alive", "bye-bye",
                 "get-status", "set-volume"]
 
-# Enum de source renvoyé par get-status (firmware custom) -> nom lisible.
-SOURCE_ENUM = {0x0B: "iPod", 0x0C: "Home Network", 0x0D: "vTuner",
-               0x10: "USB", 0x11: "Bluetooth"}
+# Code de source renvoyé par get-status (firmware custom) -> nom lisible. Vérifié sur
+# l'ampli le 2026-11-13 en sélectionnant chaque source (16 = Home Network DMR : décompilage).
+SOURCE_ENUM = {0: "Cable Sat", 1: "Disc", 2: "MHL", 3: "AUX", 4: "Game", 5: "STB",
+               6: "Audio", 7: "TV", 8: "AM", 9: "FM", 10: "USB", 11: "iPod",
+               12: "Home Network", 13: "vTuner", 16: "Home Network", 17: "Bluetooth"}
 
 
 def parse_status(para):
-    """Parse le `para` de get-status ('vol,mute,src[,fw]') -> dict {vol,mute,source[,fw]}."""
-    vol, mute, src, fw = (para.split(",") + ["", "", "", ""])[:4]
+    """Parse le `para` de get-status ('vol,mute,src[,fw[,pwr]]') ->
+    dict {vol,mute,source[,fw][,power]} ; power (firmware >= 1.0.5) : True = allumé, False = sleep."""
+    vol, mute, src, fw, pwr = (para.split(",") + ["", "", "", "", ""])[:5]
     d = {"vol": int(vol), "mute": bool(int(mute)),
          "source": SOURCE_ENUM.get(int(src), str(int(src)))}
     if fw:
         d["fw"] = fw          # version du firmware custom (patch >= v1.0.0)
+    if pwr:
+        d["power"] = bool(int(pwr))
     return d
 
 
@@ -249,6 +255,8 @@ def main(argv):
                     f"mute {'on' if st['mute'] else 'off'} | source {st['source']}")
             if "fw" in st:
                 line += f" | fw {st['fw']}"
+            if "power" in st:
+                line = ("allumé | " if st["power"] else "en sleep | ") + line
             print(line)
         elif cmd == "version":
             st = amp.get_status()

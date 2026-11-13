@@ -22,17 +22,17 @@ targets the STM32 MCU (code caves + detours in the rewritten flash region).
 
 | Feature | Implemented | Validated on hardware |
 |---------|:-----------:|:---------------------:|
-| `get-status` — real-time volume / mute / source / firmware version | ✅ | ✅ |
+| `get-status` — real-time volume / mute / source / firmware version / power state | ✅ | ✅ |
 | `set-volume` — absolute volume (0–180) | ✅ | ✅ |
 | Direct Bluetooth source select | ✅ | ✅ |
-| Push state on change (Home Assistant without polling) | ⬜ planned | — |
+| Push state on change (Home Assistant without polling) | 🧪 in the builder (`push`), not in any release | — |
 | Configurable power-on source + volume | ⬜ planned | — |
 | Volume ceiling (max / at power-on) | ⬜ planned | — |
 | HDMI-CEC: don't power off when the TV turns off | ⬜ planned | — |
 | HDMI-CEC: better power / volume / input sync | ⬜ planned | — |
 | Surround mode per source / direct selection¹ | ⬜ planned | — |
 | Per-input level trim | ⬜ planned | — |
-| Network power-on that always works, whether the amp is in sleep or off | ⬜ planned | — |
+| Network power-on that always works: the amp stays in sleep instead of turning fully off after an hour | ✅ | ✅ (85 min in sleep, then powered on over the network) |
 | ~~Zone 2~~ | ❌ dropped | hardware-impossible (single NJU72340 feeds all channels) |
 
 ¹ A native `surround-mode` command already exists over the API, but it **cycles** modes (the
@@ -42,31 +42,40 @@ Patch #1 ships the first three; the rest are planned.
 
 ## Firmware releases — exact contents
 
-Both released images are the stock V002.20 file (6,291,456 bytes) with bytes changed **only**
-in the MCU application region: a 4-byte detour and a code cave. The resident bootloader
+All released images are the stock V002.20 file (6,291,456 bytes) with bytes changed **only**
+in the MCU application region: a 4-byte detour and a code cave, plus one branch byte in v1.0.5. The resident bootloader
 (`< 0x10000`) and the other components in the file (`≥ 0x100000`, DSP etc.) are byte-identical
 to stock. Facts below were read back from the published release assets.
 
-| | **v1.0.0** | **v1.0.4** (current) |
-|---|---|---|
-| SHA-256 | `b29910b3…0bd4` | `2f0df184…a672` |
-| Bytes changed vs stock | 618 | 641 |
-| Detour | `0x0804F328` (`cmd_dispatch` entry): `b.w 0x080E0180` | same |
-| `get-status` | ✅ replies `vol,mute,src,1.0.0` | ✅ replies `vol,mute,src,1.0.4` (same routine, byte-identical) |
-| `source-selection` + `Bluetooth` | ✅ direct Bluetooth | ✅ same handler, byte-identical |
-| `set-volume` | ❌ **inoperative**: 130-byte routine present (loop of up to 128 re-entrant volume steps) but unreachable — the command string in the image reads `set-volusource-selection`, so the command is passed to the stock dispatcher, which ignores it | ✅ 150-byte single-shot routine, lands exactly on the target |
-| Hardware validation | get-status, Bluetooth | get-status, Bluetooth, set-volume (16/16 targets exact), control port healthy after cold boot |
+| | **v1.0.0** | **v1.0.4** | **v1.0.5** (current) |
+|---|---|---|---|
+| SHA-256 | `b29910b3…0bd4` | `2f0df184…a672` | `d0717fba…9d16` |
+| Bytes changed vs stock | 618 | 641 | 598 |
+| Detour | `0x0804F328` (`cmd_dispatch` entry): `b.w 0x080E0180` | same | same |
+| `get-status` | ✅ replies `vol,mute,src,1.0.0` | ✅ replies `vol,mute,src,1.0.4` (same routine, byte-identical) | ✅ replies `vol,mute,src,1.0.5,pwr` — new 5th field: `1` on, `0` in sleep (232-byte routine) |
+| `source-selection` + `Bluetooth` | ✅ direct Bluetooth | ✅ same handler, byte-identical | ✅ same handler, byte-identical |
+| `set-volume` | ❌ **inoperative**: 130-byte routine present (loop of up to 128 re-entrant volume steps) but unreachable — the command string in the image reads `set-volusource-selection`, so the command is passed to the stock dispatcher, which ignores it | ✅ 150-byte single-shot routine, lands exactly on the target | ✅ same routine, byte-identical |
+| Hardware validation | get-status, Bluetooth | get-status, Bluetooth, set-volume (16/16 targets exact), control port healthy after cold boot | all of v1.0.4, power field (on → sleep → on), 85 min in sleep still reachable then powered on over the network |
+| Stays on the network in sleep | ❌ stock: fully off 60 min after going to sleep, network module powered down | ❌ same as stock | ✅ the 3600 s countdown never runs (`beq` → `b` at `0x08010AFE`, one byte) |
 
 `get-status` reply fields: `vol` is the master volume 0–180 (dB = −80 + 0.5 × vol), `mute` is
-0/1, `src` is the firmware's internal source number in decimal (observed: 2 = MHL, 9 = Game,
-17 = Bluetooth), then the custom firmware version.
+0/1, `src` is the firmware's internal source number in decimal, then the custom firmware
+version, then (v1.0.5+) the power state. Source numbers, each selected and read back on
+hardware: 0 Cable Sat, 1 Disc, 2 Media Server / MHL, 3 AUX, 4 Game, 5 STB, 6 Audio, 7 TV, 8 AM,
+9 FM, 10 USB, 11 iPod, 12 Home Network, 13 vTuner, 17 Bluetooth.
 
-Cave layout in v1.0.4 (offsets from `0x080E0000`): strings `get-status` +0x000, `,` +0x010,
+Without the sleep change, a sleeping amp turns itself fully off after one hour and can then only
+be woken with the remote or the front panel (Wake-on-LAN does nothing). With v1.0.5 it stays in
+"Device Sleep", keeps answering on port 10025 and accepts `power-on`. The cost is the sleep-mode
+power draw, which was not measured.
+
+Cave layout in v1.0.4 and v1.0.5 (offsets from `0x080E0000`): strings `get-status` +0x000, `,` +0x010,
 `set-volume` +0x018, `source-selection` +0x024, `Bluetooth` +0x035, version +0x3C0; routines
 `emit_status` +0x040 (276 bytes), dispatcher +0x180 (112 bytes, including the relocated 4-byte
 prologue and the jump back), `set_volume` +0x280 (150 bytes), Bluetooth handler +0x340
 (44 bytes). In v1.0.0 `source-selection` was at +0x020 and `Bluetooth` at +0x032 — the overlap
-with `set-volume` (11 bytes at +0x018) is the bug.
+with `set-volume` (11 bytes at +0x018) is the bug. In v1.0.5 `emit_status` is 232 bytes at the
+same +0x040; everything else in the cave is unchanged.
 
 v1.0.1, v1.0.2, v1.0.2d and v1.0.3 were hardware-test builds and were never released.
 
@@ -128,6 +137,12 @@ Full technical detail: `firmware/re/NOTES.md`.
   connections on three boots; re-flashing v1.0.2 fixed it and the compacted v1.0.4 is healthy.
   **The cause is not understood.** Until it is, a test keeps `set_volume` within the proven
   footprint, and any growth of the cave should be validated on hardware.
+- **Control port refused after flashing v1.0.5.** On the first boot after the flash, port 10025
+  refused connections for 7 minutes (ping fine) after one early connection had succeeded. A
+  mains power cycle, then waiting 2.5 minutes before connecting, fixed it and it has been
+  healthy since. Not settled: connecting too early during boot, or the first boot after any
+  flash. This may also be what was blamed on v1.0.3 above. After flashing or a power cut, wait a
+  couple of minutes before the first connection.
 - The stock dispatcher ignores a command that arrives within roughly half a second of the
   previous handled one (cooldown). `ampli.py` re-sends `set-volume` when that happens.
 
@@ -184,12 +199,12 @@ python3 -m venv .venv && ./.venv/bin/pip install keystone-engine capstone unicor
 # (keystone needs its native lib: brew install keystone)
 ./.venv/bin/python -m pytest -q                     # static + emulation tests
 ./.venv/bin/python -c "import patchlib; from build_patch1 import build_patch1, FW_VERSION; \
-  patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth'}), f'out/AVR1610_patch1_v{FW_VERSION}.fw')"
+  patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth','keepsleep'}), f'out/AVR1610_patch1_v{FW_VERSION}.fw')"
 ```
 
 The patch only adds/changes the rewritten region (`0x10000–0xFFFFF`): a 4-byte detour on
 `cmd_dispatch` + a code cave at `0x080E0000`. The image is the **same size, 1:1** with stock.
-The build is reproducible: building the `v1.0.4` tag yields the release asset's SHA-256.
+The build is reproducible: building the `v1.0.4` or `v1.0.5` tag yields the release asset's SHA-256.
 
 ---
 
