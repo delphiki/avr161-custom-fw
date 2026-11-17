@@ -90,7 +90,8 @@ A_PWR = 0x2000ddd4                 # bit 1 = ampli allumé (0 en sleep)
 A_CTX = 0x2000cb1c
 
 
-def run_getstatus(img, vol=110, mute=False, src=2, power=True, other_flags=0, surround=0, sur_cat=0):
+def run_getstatus(img, vol=110, mute=False, src=2, power=True, other_flags=0, surround=0, sur_cat=0,
+                  sleep_flags=0):
     """Envoie get-status à cmd_dispatch en exécutant le VRAI cave et les VRAIES fonctions
     utilitaires du firmware (strlen, strcpy, memset, int2dec). build_reply et net_send sont
     interceptés. Retourne dict : replies = [(name, zone, para)], sent = nb d'appels net_send,
@@ -104,6 +105,7 @@ def run_getstatus(img, vol=110, mute=False, src=2, power=True, other_flags=0, su
     mu.mem_write(A_DE40, bytes([0x02]))                     # ancien « mute » : doit être ignoré
     mu.mem_write(A_SRC, bytes([src]))
     mu.mem_write(A_PWR, bytes([(other_flags & ~2 & 0xff) | (2 if power else 0)]))
+    mu.mem_write(0x2000dde0, bytes([sleep_flags]))           # bit 1 : en veille (pas encore éteint)
     mu.mem_write(SUR_PTR, struct.pack("<I", SUR_STRUCT))
     mu.mem_write(SUR_STRUCT + 0x11, bytes([surround]))
     mu.mem_write(SUR_STRUCT, struct.pack("<H", 0xa5a8 | sur_cat))   # 3 bits bas = catégorie
@@ -156,8 +158,10 @@ TICK_BEGIN = 0x08010af6            # bloc exécuté une fois par seconde par la 
 TICK_END = 0x08010b40
 
 
-def run_tick(img, vol=110, mute=False, src=2, power=True, push_ram=None, timer=0, surround=0, sur_cat=0):
-    """Exécute le bloc « tick 1 s » (0x08010af6 -> 0x08010b40) de l'image, avec le vrai cave
+def run_tick(img, vol=110, mute=False, src=2, power=True, push_ram=None, timer=0, surround=0, sur_cat=0,
+             flag=0x12345678, dde0=0xff, periph=None, ram=None):
+    """periph = {adresse: octets} : registres GPIO (0x40020000..) ; ram = {adresse: octets}.
+    Exécute le bloc « tick 1 s » (0x08010af6 -> 0x08010b40) de l'image, avec le vrai cave
     et les vraies fonctions utilitaires ; build_reply et net_send sont interceptés.
     push_ram = 5 octets initiaux à PUSH_RAM (None = RAM non initialisée, 0xFF).
     Retourne dict : replies, sent, push_ram (5 octets après), timer, off_flag, clean."""
@@ -172,10 +176,18 @@ def run_tick(img, vol=110, mute=False, src=2, power=True, push_ram=None, timer=0
     mu.mem_write(A_SRC, bytes([src]))
     mu.mem_write(A_PWR, bytes([0x0d | (2 if power else 0)]))
     mu.mem_write(0x2000dd7c, struct.pack("<I", timer))
+    mu.mem_write(0x2001ff08, struct.pack("<I", flag))
+    mu.mem_write(0x2000dde0, bytes([dde0]))
     mu.mem_write(SUR_PTR, struct.pack("<I", SUR_STRUCT))
     mu.mem_write(SUR_STRUCT + 0x11, bytes([surround]))
     mu.mem_write(SUR_STRUCT, struct.pack("<H", 0xa5a8 | sur_cat))   # 3 bits bas = catégorie
     mu.mem_write(PUSH_RAM, bytes(push_ram) if push_ram is not None else b"\xff" * 8)
+    if periph is not None:
+        mu.mem_map(0x40020000, 0x2000)
+        for a, b in periph.items():
+            mu.mem_write(a, b)
+    for a, b in (ram or {}).items():
+        mu.mem_write(a, b)
     mu.reg_write(UC_ARM_REG_SP, SP0)
     mu.reg_write(UC_ARM_REG_LR, 0xdeadbeef)
     for r, v in zip(CALLEE, SENTINELS):
@@ -212,7 +224,11 @@ def run_tick(img, vol=110, mute=False, src=2, power=True, push_ram=None, timer=0
             "push_sur": mu.mem_read(PUSH_RAM + 5, 1)[0],
             "push_cat": mu.mem_read(PUSH_RAM + 6, 1)[0],
             "timer": struct.unpack("<I", bytes(mu.mem_read(0x2000dd7c, 4)))[0],
-            "off_flag": bool(mu.mem_read(0x2000dddc, 1)[0] & 0x80)}
+            "off_flag": bool(mu.mem_read(0x2000dddc, 1)[0] & 0x80),
+            "dddc": mu.mem_read(0x2000dddc, 1)[0], "dde0": mu.mem_read(0x2000dde0, 1)[0],
+            "delay": mu.mem_read(0x2000e1dd, 1)[0],
+            "flag": struct.unpack("<I", bytes(mu.mem_read(0x2001ff08, 4)))[0],
+            "read": lambda a, n: bytes(mu.mem_read(a, n))}
 
 
 F_SURAUTO = 0x0803b120             # (1) -> mode que « Auto Select » choisirait maintenant
@@ -288,7 +304,7 @@ A_OFFFLAGS = 0x2000dddc            # bit 7 = extinction complète demandée
 GPIO_BASE = 0x40020000             # GPIOA ; un port tous les 0x400 ; +0x18 = mise à 1, +0x1a = mise à 0
 
 
-def run_power_step(img, step, full_off, de40=0):
+def run_power_step(img, step, full_off, de40=0, flag=0x12345678):
     """Exécute UN pas de la séquence d'extinction (ampli déjà marqué éteint) et retourne la
     liste ordonnée des écritures GPIO : (port 'A'..'G', 'set' | 'clr', masque).
     Les appels sortants autres que les deux primitives GPIO sont neutralisés."""
@@ -302,6 +318,7 @@ def run_power_step(img, step, full_off, de40=0):
     mu.mem_write(A_SEQ, struct.pack("<I", step + 1))
     mu.mem_write(A_OFFFLAGS, bytes([0x80 if full_off else 0x00]))
     mu.mem_write(A_DE40, bytes([de40]))
+    mu.mem_write(0x2001ff08, struct.pack("<I", flag))
     mu.reg_write(UC_ARM_REG_SP, SP0)
     mu.reg_write(UC_ARM_REG_LR, RET | 1)
     writes = []
@@ -313,7 +330,8 @@ def run_power_step(img, step, full_off, de40=0):
 
     def on_code(mu, addr, size, ud):
         # tout appel qui sort de la séquence, sauf les primitives GPIO, revient aussitôt
-        if not (POWER_SEQ <= addr < POWER_SEQ + 0xd42) and addr not in range(0x08040a6a, 0x08040a8c):
+        if (not (POWER_SEQ <= addr < POWER_SEQ + 0xd42) and addr not in range(0x08040a6a, 0x08040a8c)
+                and not (0x080e0000 <= addr < 0x08100000)):
             if addr != RET:
                 mu.reg_write(UC_ARM_REG_R0, 0)
                 mu.reg_write(UC_ARM_REG_PC, mu.reg_read(UC_ARM_REG_LR) | 1)
@@ -325,7 +343,54 @@ def run_power_step(img, step, full_off, de40=0):
     return writes
 
 
-def run_fulloff(img, power=True, sleep_timer=0, dddc=0x00, dde0=0xff):
+NETSTBY_RAM = 0x2001ff08           # indicateur « extinction profonde » (comportement d'origine)
+DEEP_ARMED = 0x44454550           # demandée par `power-full-off deep`
+DEEP_ACTIVE = 0x44454551          # le MCU est passé en STOP au moins une fois depuis
+STOP_ENTRY = 0x080146b4            # routine qui met le MCU en mode STOP (ampli éteint)
+STOP_WFI = 0x08065580              # ... par cet appel
+
+
+def run_stop_entry(img, flag):
+    """Exécute l'entrée de la routine de mise en sommeil du MCU avec `flag` dans NETSTBY_RAM.
+    Retourne dict : stopped = l'appel de mise en STOP est atteint, first_gpio = 1re écriture
+    GPIO (la routine d'origine commence par couper PG3), clean = retour propre."""
+    from unicorn import UC_HOOK_MEM_WRITE
+    mu = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
+    mu.mem_map(0x08000000, 0x100000)
+    mu.mem_write(0x08000000, bytes(img[:0x100000]))
+    mu.mem_map(0x20000000, 0x20000)
+    mu.mem_map(0x40020000, 0x4000)
+    mu.mem_write(NETSTBY_RAM, struct.pack("<I", flag))
+    mu.reg_write(UC_ARM_REG_SP, SP0)
+    mu.reg_write(UC_ARM_REG_LR, RET | 1)
+    for r, v in zip(CALLEE, SENTINELS):
+        mu.reg_write(r, v)
+    seen = {"stopped": False, "gpio": []}
+
+    def on_write(mu, access, addr, size, value, ud):
+        seen["gpio"].append((addr, value))
+
+    def on_code(mu, addr, size, ud):
+        if addr == STOP_WFI:
+            seen["stopped"] = True
+        inside = STOP_ENTRY <= addr < STOP_ENTRY + 0x20 or 0x080e0000 <= addr < 0x08100000
+        if not inside and addr not in range(0x08040a84, 0x08040a8c) and addr != RET:
+            mu.reg_write(UC_ARM_REG_PC, mu.reg_read(UC_ARM_REG_LR) | 1)
+
+    mu.hook_add(UC_HOOK_MEM_WRITE, on_write, begin=0x40020000, end=0x40023fff)
+    mu.hook_add(UC_HOOK_CODE, on_code)
+    err = None
+    try:
+        mu.emu_start(STOP_ENTRY | 1, RET, count=100000)
+    except UcError as e:
+        err = e
+    clean = (err is None and mu.reg_read(UC_ARM_REG_PC) == RET and mu.reg_read(UC_ARM_REG_SP) == SP0
+             and tuple(mu.reg_read(r) for r in CALLEE) == SENTINELS)
+    return {"stopped": seen["stopped"], "gpio": seen["gpio"], "clean": clean, "err": err,
+            "flag": struct.unpack("<I", bytes(mu.mem_read(NETSTBY_RAM, 4)))[0]}
+
+
+def run_fulloff(img, power=True, sleep_timer=0, dddc=0x00, dde0=0xff, para=b"", flag=0x12345678):
     """Envoie power-full-off à cmd_dispatch. Retourne dict : dddc, dde0, delay (0x2000e1dd),
     stock (passages par le dispatch stock), clean."""
     mu = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
@@ -338,6 +403,8 @@ def run_fulloff(img, power=True, sleep_timer=0, dddc=0x00, dde0=0xff):
     mu.mem_write(0x2000dde0, bytes([dde0]))
     mu.mem_write(STRUCT, b"power-full-off\0")
     mu.mem_write(STRUCT + 0x20, b"Main Zone\0")
+    mu.mem_write(STRUCT + 0x40, para + b"\0")
+    mu.mem_write(NETSTBY_RAM, struct.pack("<I", flag))
     mu.reg_write(UC_ARM_REG_SP, SP0)
     mu.reg_write(UC_ARM_REG_R0, STRUCT)
     mu.reg_write(UC_ARM_REG_LR, RET | 1)
@@ -359,7 +426,9 @@ def run_fulloff(img, power=True, sleep_timer=0, dddc=0x00, dde0=0xff):
              and mu.reg_read(UC_ARM_REG_SP) == SP0
              and tuple(mu.reg_read(r) for r in CALLEE) == SENTINELS)
     return {"dddc": mu.mem_read(A_OFFFLAGS, 1)[0], "dde0": mu.mem_read(0x2000dde0, 1)[0],
-            "delay": mu.mem_read(0x2000e1dd, 1)[0], "stock": stock[0], "clean": clean, "err": err}
+            "delay": mu.mem_read(0x2000e1dd, 1)[0], "stock": stock[0], "clean": clean, "err": err,
+            "flag": struct.unpack("<I", bytes(mu.mem_read(NETSTBY_RAM, 4)))[0],
+            "timer": struct.unpack("<I", bytes(mu.mem_read(0x2000dd7c, 4)))[0]}
 
 
 def run_mute(img, name, muted):
@@ -395,3 +464,64 @@ def run_mute(img, name, muted):
                 and tuple(mu.reg_read(r) for r in CALLEE) == SENTINELS)
     return {"stock": stock[0] == 1, "swallowed": stock[0] == 0 and returned, "err": err,
             "flags": mu.mem_read(A_MUTE, 1)[0]}
+
+
+DIAG_RAM = 0x2001ff0c              # adresse mémorisée par debug-peek (feature diag, images de test)
+
+
+def run_diag(img, name, para=b"", mem=None, diag_addr=None):
+    """Envoie debug-peek / debug-poke à cmd_dispatch (vrai cave, vraies fonctions utilitaires ;
+    build_reply et net_send interceptés). mem = {adresse: octets} posés avant l'appel.
+    Retourne dict : replies, sent, stock, clean, read(adresse, n), addr (adresse mémorisée)."""
+    mu = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
+    mu.mem_map(0x08000000, 0x100000)
+    mu.mem_write(0x08000000, bytes(img[:0x100000]))
+    mu.mem_map(0x20000000, 0x20000)
+    for a, b in (mem or {}).items():
+        mu.mem_write(a, b)
+    if diag_addr is not None:
+        mu.mem_write(DIAG_RAM, struct.pack("<I", diag_addr))
+    mu.mem_write(STRUCT, name + b"\0")
+    mu.mem_write(STRUCT + 0x20, b"Main Zone\0")
+    mu.mem_write(STRUCT + 0x40, para + b"\0")
+    mu.reg_write(UC_ARM_REG_SP, SP0)
+    mu.reg_write(UC_ARM_REG_R0, STRUCT)
+    mu.reg_write(UC_ARM_REG_LR, RET | 1)
+    for r, v in zip(CALLEE, SENTINELS):
+        mu.reg_write(r, v)
+    replies, sent, stock = [], [0], [0]
+
+    def cstr(a):
+        return bytes(mu.mem_read(a, 0x40)).split(b"\0")[0]
+
+    def ret(mu):
+        mu.reg_write(UC_ARM_REG_PC, mu.reg_read(UC_ARM_REG_LR) | 1)
+
+    def on_build(mu, addr, size, ud):
+        from unicorn.arm_const import UC_ARM_REG_R1, UC_ARM_REG_R2
+        replies.append((cstr(mu.reg_read(UC_ARM_REG_R0)), cstr(mu.reg_read(UC_ARM_REG_R1)),
+                        cstr(mu.reg_read(UC_ARM_REG_R2))))
+        ret(mu)
+
+    def on_send(mu, addr, size, ud):
+        sent[0] += 1
+        ret(mu)
+
+    def on_stock(mu, addr, size, ud):
+        stock[0] += 1
+        mu.emu_stop()
+
+    mu.hook_add(UC_HOOK_CODE, on_build, begin=F_BUILDREPLY, end=F_BUILDREPLY)
+    mu.hook_add(UC_HOOK_CODE, on_send, begin=F_NETSEND, end=F_NETSEND)
+    mu.hook_add(UC_HOOK_CODE, on_stock, begin=STOCK_BODY, end=STOCK_BODY)
+    err = None
+    try:
+        mu.emu_start(CMD_DISPATCH | 1, RET, count=1_000_000)
+    except UcError as e:
+        err = e
+    clean = (err is None and stock[0] == 0 and mu.reg_read(UC_ARM_REG_PC) == RET
+             and mu.reg_read(UC_ARM_REG_SP) == SP0
+             and tuple(mu.reg_read(r) for r in CALLEE) == SENTINELS)
+    return {"replies": replies, "sent": sent[0], "stock": stock[0], "clean": clean, "err": err,
+            "read": lambda a, n: bytes(mu.mem_read(a, n)),
+            "addr": struct.unpack("<I", bytes(mu.mem_read(DIAG_RAM, 4)))[0]}

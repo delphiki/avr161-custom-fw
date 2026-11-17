@@ -5,7 +5,7 @@ CAVE_VA = 0x080E0000  # base du code-cave (zone réécrite, 128 Ko de 0xFF)
 
 # Version du firmware CUSTOM (indépendante du stock V002.20). Source unique de vérité :
 # embarquée dans le firmware (4e champ de get-status) + nom de l'artefact + tag de release.
-FW_VERSION = "1.1.0"
+FW_VERSION = "1.2.0"
 
 # --- Test A : patch cosmétique d'un nom de source OSD (preuve de récupération USB) ---
 SRCNAME_OFF = 0xd9904            # flash 0x080d9904 : "USB" dans la table d'affichage source (0x8053684)
@@ -137,12 +137,11 @@ OSD_MSGBOX_GREEN = 0x08
 # netoff : le module réseau reste alimenté ampli éteint. Son convertisseur est sur le rail de
 # veille ST+5V ; NET_PWR_SW = PD9 le coupe, BCO_RST = PD8 le tient en reset (schéma p. 169/171).
 # Séquence d'extinction FUN_0801396c, extinction complète demandée (bit 7 de 0x2000dddc) :
-NETOFF_C6_BPL  = 0x0801410c        # pas 0xc6 : `bpl` vers la branche sleep (PD9 = 1, PD8 intact)
-NETOFF_C6_KEEP = 0x08014128        # ... qu'on prend toujours
-NETOFF_AF_MOV  = 0x08014312        # pas 0xaf : `mov.w r1,#0x200 ; ldr r0,=GPIOD ; bl gpio_clear`
-NETOFF_AF_BL   = 0x0801431a        # -> `mov.w r1,#0x100 ; ... ; bl gpio_set` : PD8 = 1 (sortie de
-                                   # reset), 23 pas après la mise sous tension. Nécessaire au
-                                   # démarrage en veille (rebranchement secteur), où PD8 est bas.
+NETOFF_C6_PWR  = 0x08014116        # pas 0xc6 : `bl gpio_clear` (GPIOD, 0x200)  PD9
+NETOFF_C6_RST  = 0x08014122        # pas 0xc6 : `bl gpio_clear` (GPIOD, 0x100)  PD8
+NET_GATES      = CAVE_VA + 0x6c0   # trois portes conditionnées par l'indicateur RAM
+NETOFF_AF_BL   = 0x0801431a        # pas 0xaf : `bl gpio_clear` (GPIOD, 0x200) -> avec l'indicateur,
+                                   # PD8 = 1 (sortie de reset, 23 pas après la mise sous tension)
 F_GPIO_CLEAR   = 0x08040a88
 F_GPIO_SET     = 0x08040a84
 STR_FULLOFF    = CAVE_VA + 0x3e0   # "power-full-off\0"
@@ -151,6 +150,112 @@ A_OFFFLAGS     = 0x2000dddc        # bit 7 = extinction complète demandée
 A_FLAGS_DDE0   = 0x2000dde0
 A_PWRDELAY     = 0x2000e1dd        # action d'alimentation différée (tics)
 A_SLEEPTIMER   = 0x2000dd7c        # != 0 : ampli en sleep, temporisation armée
+# Une fois éteint, FUN_080146b4 met le MCU en mode STOP (réveil par interruption externe) : il ne
+# peut alors plus répondre au module réseau. PAR DÉFAUT cette mise en sommeil est sautée et le
+# module reste alimenté (validé 8 h sur matériel le 2026-11-14). `power-full-off deep` pose un
+# indicateur EN RAM qui redonne l'extinction d'origine (module coupé, MCU en STOP) :
+# DEEP_ARMED à la commande, DEEP_ACTIVE au premier passage en STOP, effacé par le tick 1 s dès
+# que l'ampli est rallumé. Le MCU se réveille aussi pour autre chose qu'un allumage (il se
+# rendort ensuite) : l'indicateur doit donc survivre aux réveils, pas à l'allumage.
+STOP_ENTRY     = 0x080146b4        # push {r7,lr} ; movs r1,#8  (4 octets déplacés dans le cave)
+STOP_GATE      = CAVE_VA + 0x800
+# Reconfiguration réseau du module, FUN_08074ef2 : « couper l'interface (08010000 <- 0), régler,
+# la rallumer ». Le firmware la programme à chaque allumage depuis l'éteint ; si l'ampli est
+# éteint avant qu'elle parte, elle part au début de l'extinction complète et s'arrête après la
+# coupure : module alimenté mais absent du réseau (journal des requêtes, 2026-11-15). Hors
+# extinction profonde, elle n'est donc jamais lancée ampli éteint.
+NET_SETUP      = 0x08074ef2        # push {r4, lr} ; movs r4, r0  (4 octets déplacés)
+NET_SETUP_GATE = CAVE_VA + 0x828
+NETSTBY_RAM    = 0x2001ff08        # RAM inutilisée, à côté de l'état du push
+DEEP_ARMED     = 0x44454550        # "PEED" ; DEEP_ACTIVE = DEEP_ARMED | 1
+DEEP_ACTIVE    = 0x44454551
+# sleeptimer : rétablit le décompte veille -> éteint (3600 s) que keepsleep neutralise, dans le
+# cave puisque push occupe le bloc d'origine. Efface aussi l'indicateur d'extinction profonde.
+SLEEP_TICK     = CAVE_VA + 0x780   # appelée par le tick 1 s, enchaîne sur push_tick
+
+
+# diag (images de TEST uniquement, jamais dans une version publiée) : lecture / écriture de la
+# RAM par le réseau. debug-peek <adresse décimale> mémorise l'adresse et répond les 4 octets
+# lus ; debug-poke <valeur décimale> écrit le mot à l'adresse mémorisée si elle est en RAM.
+STR_PEEK       = CAVE_VA + 0x860   # "debug-peek\0"
+STR_POKE       = CAVE_VA + 0x86c   # "debug-poke\0"
+DIAG           = CAVE_VA + 0x880   # routine diag(r0 = struct) -> 1 si commande reconnue
+DIAG_RAM       = 0x2001ff0c        # adresse mémorisée (à côté de NETSTBY_RAM)
+# trace : chaque seconde, tant que l'ampli n'est pas allumé, note dans un anneau de 64 entrées
+# de 8 octets : GPIOD ODR ; (dddc << 8) | mode des broches PD8..PD11 ; dd5c ; GPIOG ODR.
+# [TRACE_RAM] = indice de la dernière entrée écrite ; entrées à partir de TRACE_RAM + 8.
+DIAG_TRACE     = CAVE_VA + 0xa00
+TRACE_RAM      = 0x2001fc00        # + 0x210 : ODR des ports A..G au dernier tic ampli éteint
+# journal des requêtes envoyées au module : détour de FUN_08073984(r0 = opération, r1 = requête
+# {nœud, longueur, données}). Anneau de 512 entrées de 16 octets : nœud ; opération ; longueur ;
+# dd5c ; 4 premiers octets écrits ; secondes ; ddd4 ; dddc. Jamais figé.
+NODE_SEND      = 0x08073984
+NODE_HOOK      = CAVE_VA + 0xb00
+NODE_IDX       = 0x2001bff8        # indice de la dernière entrée ; + 4 : compteur de secondes
+NODE_RING      = 0x2001c000
+# ... et de ce qu'il renvoie, dans le même anneau : notifications (opération 0xc6, valeur = 1er
+# octet reçu ; détour du rappel 0x0808671c) et accusés d'écriture (0x84, valeur = état ; détour
+# du rappel 0x080866d0). 08090300 / 08090400 ignorés, comme à l'envoi.
+NOTIF_CB       = 0x0808671c        # push {r3-r7, lr} ; movs r4, r0   r0 -> {nœud, ?, données}
+WRITE_CB       = 0x080866d0        # push {r4-r6, lr} ; movs r4, r0   r0 -> {nœud, ..., +0xc état}
+DIAG_LOG       = CAVE_VA + 0xc80   # diag_log(r0 = nœud, r1 = opération, r2 = valeur)
+NOTIF_HOOK     = CAVE_VA + 0xd00
+WRITE_HOOK     = CAVE_VA + 0xd80
+
+# État du client du port de commande, tenu par la notification 08090200 du module.
+A_PORTCLIENT   = 0x2000e2a8        # u8, 0 = client connecté, 1 = personne (valeur initiale)
+
+
+# portguard : écrire le port (08090100) dans le module pendant qu'un client est connecté coupe
+# ce client et laisse le port fermé. FUN_08087d9c l'écrit sans rien vérifier (deux fois à 2 s
+# d'écart au démarrage) : on la court-circuite tant qu'un client est connecté, c'est-à-dire
+# tant que l'état du client vaut 0 (il vaut 1 à l'initialisation et sans client).
+PORT_WRITE     = 0x08087d9c        # push {r4, lr} ; sub sp, #8
+PORT_GUARD     = CAVE_VA + 0xe00
+
+
+# Couper ou relancer l'interface réseau du module (FUN_08087304, nœud 08010000) fait tomber le
+# client sans notification : on remet l'état à « personne », sinon l'écriture du port qui suit
+# la relance serait court-circuitée et le port resterait fermé.
+NET_IFACE      = 0x08087304        # push {r3, r4, r5, lr} ; movs r4, r0
+IFACE_HOOK     = CAVE_VA + 0xe40
+
+
+# À l'allumage depuis l'éteint, le firmware d'origine reconfigure le réseau du module (coupure et
+# relance de l'interface, réécriture du port) : il le croit tout juste redémarré. Avec netoff le
+# module est resté allumé et configuré ; cette relance coupe le client ~30 s et laisse parfois le
+# port fermé. Dès qu'un client s'est connecté (preuve que le réseau du module marche) et jusqu'à
+# la prochaine coupure du module, le tick 1 s annule les deux tempos qui mènent à la
+# reconfiguration (essai matériel du 2026-11-17 à 00:10 : allumage sans coupure). Une extinction
+# profonde, qui coupe le module, efface la marque ; au démarrage à froid la RAM ne contient pas
+# le mot magique. La marque n'est PAS posée sur l'accusé d'écriture du port : au démarrage à
+# froid il arrive avant que le module soit sur le réseau, et les mêmes tempos servent alors à
+# finir sa configuration (v1.2.15-diag, 00:33 : module absent du réseau après rebranchement).
+PORT_OK        = 0x2001ff10        # u32, PORT_OK_MAGIC = un client s'est connecté
+PORT_OK_MAGIC  = 0x324b4f50        # "POK2" (la v1.2.15-diag utilisait "PTOK", posé trop tôt)
+A_RECONF_T1    = 0x2000dec8        # tempo (10 ms) armée par le pas d'allumage quand e232 == 0
+A_RECONF_T2    = 0x2000decc        # tempo suivante ; à zéro : événement 0x900 -> FUN_08074ef2(1)
+PORT_TICK      = CAVE_VA + 0xec0   # appelé par le tick 1 s avant les autres
+
+
+def _iface_hook_src():
+    return _mw("r1", A_PORTCLIENT) + "movs r2, #1\nstrb r2, [r1]\n"
+
+
+def _port_guard_src():
+    return (_mw("r0", A_PORTCLIENT) + "ldrb r0, [r0]\ncmp r0, #0\nbne pg_write\nbx lr\npg_write:\n")
+
+
+def _port_tick_src(next_tick):
+    return (_mw("r0", NETSTBY_RAM) + "ldr r1, [r0]\nbic r1, r1, #1\n" + _mw("r2", DEEP_ARMED)
+            + _mw("r0", PORT_OK) + "cmp r1, r2\nbne pt_live\n"
+            "movs r1, #0\nstr r1, [r0]\nb pt_end\n"
+            "pt_live:\n" + _mw("r2", PORT_OK_MAGIC)
+            + _mw("r1", A_PORTCLIENT) + "ldrb r1, [r1]\ncmp r1, #0\nit eq\nstreq r2, [r0]\n"
+            "ldr r1, [r0]\ncmp r1, r2\nbne pt_end\n"
+            "movs r1, #0\n" + _mw("r0", A_RECONF_T1) + "str r1, [r0]\n"
+            + _mw("r0", A_RECONF_T2) + "str r1, [r0]\n"
+            f"pt_end:\nb.w #{next_tick}\n")
 
 
 def _lo(a): return a & 0xffff
@@ -161,8 +266,8 @@ def _mw(reg, a): return f"movw {reg}, #{_lo(a):#x}\nmovt {reg}, #{_hi(a):#x}\n"
 PARA_BUF_SIZE = 32                 # "180,1,17,1.1.0-test,1,45,6\0" : 27 o au plus
 
 
-def _emit_status_src(surround=False, legacy_mute=False):
-    """get-status -> para "vol,mute,src,<version>,pwr" (pwr : 1 = allumé, 0 = sleep).
+def _emit_status_src(surround=False, legacy_mute=False, power_state=False):
+    """get-status -> para "vol,mute,src,<version>,pwr" (pwr : 1 = allumé, 2 = en veille, 0 = éteint).
     r4 = struct commande, r5 = PARA_BUF (pile). Trois sous-routines locales évitent de
     répéter les séquences d'ajout (la routine doit tenir dans son créneau du cave)."""
     return (
@@ -184,8 +289,14 @@ def _emit_status_src(surround=False, legacy_mute=False):
         + _mw("r0", A_SRC) + "ldrb r0, [r0]\nbl app_dec\nbl app_comma\n"
         # <version firmware custom>,
         + _mw("r1", STR_FWVER) + "bl app_str\nbl app_comma\n"
-        # pwr = (*power_flags >> 1) & 1   (5e champ, v1.0.5)
-        + _mw("r0", A_PWRZONE) + "ldrb r0, [r0]\nbl app_bit1\n"
+        # pwr (5e champ) : 1 = allumé (bit 1 de ddd4). Feature powerstate : sinon 2 = en veille,
+        # 0 = éteint (bit 1 de dde0, que la fin de la temporisation de veille efface) ; sans
+        # elle, 0 dans les deux cas (images jusqu'à la v1.1.0).
+        + (_mw("r0", A_PWRZONE) + "ldrb r0, [r0]\nlsrs r0, r0, #1\nands r0, r0, #1\nbne es_pwr\n"
+           + _mw("r0", A_FLAGS_DDE0) + "ldrb r0, [r0]\nand r0, r0, #2\n"
+           "es_pwr:\nbl app_dec\n"
+           if power_state else
+           _mw("r0", A_PWRZONE) + "ldrb r0, [r0]\nbl app_bit1\n")
         # mode surround appliqué (6e champ) et catégorie mémorisée (7e) — feature surround
         + ("bl app_comma\n" + _mw("r0", A_AUDIOPTR)
            + f"ldr r0, [r0]\nldrb r0, [r0, #{SUR_MODE_OFF}]\nbl app_dec\nbl app_comma\n"
@@ -325,7 +436,7 @@ def _bt_handler_src():
     )
 
 
-def _push_tick_src(surround=False, legacy_mute=False):
+def _push_tick_src(surround=False, legacy_mute=False, power_state=False):
     """Appelée une fois par seconde (boucle principale). Compare l'état courant au dernier
     état envoyé et, s'il a changé et qu'un client s'est manifesté récemment, émet le même
     message que la réponse à get-status. r4 = PUSH_RAM, r5 = état courant empaqueté."""
@@ -339,6 +450,9 @@ def _push_tick_src(surround=False, legacy_mute=False):
         "orr r5, r5, r0, lsl #8\n"
         + _mw("r0", A_PWRZONE) + "ldrb r0, [r0]\nand r0, r0, #2\n"
         "orr r5, r5, r0, lsl #8\n"
+        # powerstate : le bit « en veille » (bit 1 de dde0) fait partie de l'état surveillé
+        + (_mw("r0", A_FLAGS_DDE0) + "ldrb r0, [r0]\nand r0, r0, #2\norr r5, r5, r0, lsl #9\n"
+           if power_state else "")
         + _mw("r0", A_SRC) + "ldrb r0, [r0]\n"
         "orr r5, r5, r0, lsl #16\n"
         f"orr r5, r5, #{PUSH_MAGIC << 24:#x}\n"
@@ -434,6 +548,9 @@ def _cave_dispatch_part1(features):
               "cmp r0, #0\nbne not_fo\n"
               f"bl #{FULL_OFF}\npop {{r0, r4, pc}}\n"
               "not_fo:\n")
+    if "diag" in features:                    # la reconnaissance des noms est dans la routine
+        s += (f"mov r0, r4\nbl #{DIAG}\ncbz r0, not_dg\npop {{r0, r4, pc}}\n"
+              "not_dg:\n")
     if "mute" in features:
         # mute-on / mute-off : le firmware d'origine BASCULE dans les deux cas. On avale la
         # commande si l'état est déjà le bon ; sinon elle poursuit jusqu'à la bascule stock.
@@ -467,11 +584,160 @@ def _full_off_src():
         _mw("r0", A_PWRZONE) + "ldrb r0, [r0]\ntst r0, #2\nbne fo_go\n"
         + _mw("r0", A_SLEEPTIMER) + "ldr r0, [r0]\ncmp r0, #0\nbeq fo_end\n"
         "fo_go:\n"
+        # para "deep" (exactement) : extinction d'origine ; sinon l'ampli reste joignable
+        "movs r2, #0\n"
+        "ldr r1, [r4, #0x40]\n" + _mw("r0", 0x70656564) + "cmp r1, r0\nbne fo_flag\n"   # "deep"
+        "ldrb r1, [r4, #0x44]\ncmp r1, #0\nbne fo_flag\n"
+        + _mw("r2", DEEP_ARMED)
+        + "fo_flag:\n"
+        + _mw("r0", NETSTBY_RAM) + "str r2, [r0]\n"
+        + _mw("r0", A_SLEEPTIMER) + "movs r1, #0\nstr r1, [r0]\n"   # le décompte ne doit pas la rejouer
         + _mw("r0", A_OFFFLAGS) + "ldrb r1, [r0]\norr r1, r1, #0x80\nstrb r1, [r0]\n"
         + _mw("r0", A_FLAGS_DDE0) + "ldrb r1, [r0]\nbic r1, r1, #2\nstrb r1, [r0]\n"
         + _mw("r0", A_PWRDELAY) + "movs r1, #100\nstrb r1, [r0]\n"
         "fo_end:\n"
         "bx lr\n"
+    )
+
+
+def _diag_src():
+    """debug-peek / debug-poke. r4 = struct commande, r5 = tampon de réponse (pile),
+    r6 = nombre lu puis mot lu, r7 = 1 pour une écriture."""
+    return (
+        # entrée : r0 = struct ; retourne r0 = 1 si la commande était pour nous, 0 sinon
+        "push {r4, lr}\nmov r4, r0\n"
+        + _mw("r1", STR_PEEK) + f"bl #{F_STRCMP}\ncbnz r0, dg_try_poke\n"
+        "mov r0, r4\nmovs r1, #0\nbl dg_body\nmovs r0, #1\npop {r4, pc}\n"
+        "dg_try_poke:\n"
+        "mov r0, r4\n" + _mw("r1", STR_POKE) + f"bl #{F_STRCMP}\ncbnz r0, dg_no\n"
+        "mov r0, r4\nmovs r1, #1\nbl dg_body\nmovs r0, #1\npop {r4, pc}\n"
+        "dg_no:\n"
+        "movs r0, #0\npop {r4, pc}\n"
+        "dg_body:\n"                                 # r0 = struct, r1 = 0 lecture / 1 écriture
+        "push {r4,r5,r6,r7,lr}\n"
+        "mov r4, r0\nmov r7, r1\n"
+        f"sub sp, #{PARA_BUF_SIZE}\nmov r5, sp\n"
+        "add r1, r4, #0x40\nmovs r6, #0\n"          # nombre décimal de para -> r6
+        "dg_atoi:\n"
+        "ldrb r2, [r1], #1\nsubs r2, r2, #0x30\ncmp r2, #9\nbhi dg_num\n"
+        "movs r0, #10\nmuls r6, r0, r6\nadds r6, r6, r2\nb dg_atoi\n"
+        "dg_num:\n"
+        + _mw("r0", DIAG_RAM)
+        + "cbnz r7, dg_poke\n"
+        "str r6, [r0]\nb dg_read\n"                 # lecture : mémorise l'adresse
+        "dg_poke:\n"
+        "ldr r1, [r0]\nlsrs r2, r1, #17\ncmp.w r2, #0x1000\nbne dg_read\n"   # RAM seulement
+        "str r6, [r1]\n"
+        "dg_read:\n"
+        "ldr r0, [r0]\nldr r6, [r0]\n"              # r6 = mot à l'adresse mémorisée
+        + _mw("r0", A_CTX) + "movs r1, #0\nmovs r2, #12\n" + f"bl #{F_MEMSET}\n"
+        + _mw("r0", A_CTX) + _mw("r1", A_STATUSNAME) + f"bl #{F_STRCAT}\n"
+        + f"mov r0, r5\nmovs r1, #0\nmovs r2, #{PARA_BUF_SIZE}\n" + f"bl #{F_MEMSET}\n"
+        "movs r7, #4\n"
+        "dg_byte:\n"
+        "uxtb r0, r6\nlsrs r6, r6, #8\n"
+        f"bl #{F_INT2DEC}\nmov r1, r0\nbl dg_str\n"
+        "subs r7, r7, #1\nbeq dg_send\n"
+        + _mw("r1", STR_COMMA) + "bl dg_str\nb dg_byte\n"
+        "dg_send:\n"
+        "mov r0, r4\nadd r1, r4, #0x20\nmov r2, r5\n" + f"bl #{F_BUILDREPLY}\n"
+        + _mw("r0", A_NETBUF) + f"bl #{F_NETSEND}\n"
+        + _mw("r0", A_CTX) + "movs r1, #0\nstrb r1, [r0]\n"
+        + f"add sp, #{PARA_BUF_SIZE}\n"
+        "pop {r4,r5,r6,r7,pc}\n"
+        "dg_str:\n"                                  # ajoute la chaîne r1 au tampon
+        "push {r6,lr}\nmov r6, r1\n"
+        f"mov r0, r5\nbl #{F_STRLEN}\nadd r0, r5, r0\n"
+        f"mov r1, r6\nbl #{F_STRCAT}\n"
+        "pop {r6,pc}\n"
+    )
+
+
+def _diag_trace_src():
+    return (
+        _mw("r0", NODE_IDX + 4) + "ldr r1, [r0]\nadds r1, r1, #1\nstr r1, [r0]\n"   # secondes
+        + _mw("r0", A_PWRZONE) + "ldrb r0, [r0]\ntst r0, #2\nbne tr_end\n"      # figé ampli allumé
+        + _mw("r0", TRACE_RAM) + "ldr r1, [r0]\nadds r1, r1, #1\nand r1, r1, #63\nstr r1, [r0]\n"
+        "add r0, r0, r1, lsl #3\n"
+        + _mw("r2", 0x40020c00)
+        + "ldr r3, [r2, #0x14]\nstrh r3, [r0, #8]\n"
+        "ldr r3, [r2]\nlsrs r3, r3, #16\nuxtb r3, r3\n"
+        + _mw("r1", A_OFFFLAGS) + "ldrb r1, [r1]\norr r3, r3, r1, lsl #8\nstrh r3, [r0, #10]\n"
+        + _mw("r1", A_PWRSEQ) + "ldr r1, [r1]\nstrh r1, [r0, #12]\n"
+        + _mw("r1", 0x40021814) + "ldr r1, [r1]\nstrh r1, [r0, #14]\n"
+        + _mw("r0", TRACE_RAM + 0x210) + _mw("r1", 0x40020014) + "movs r2, #7\n"
+        "tr_port:\n"
+        "ldr r3, [r1]\nstr r3, [r0], #4\nadd.w r1, r1, #0x400\nsubs r2, r2, #1\nbne tr_port\n"
+        "tr_end:\n"
+        f"b.w #{SLEEP_TICK}\n"
+    )
+
+
+def _node_hook_src():
+    return (
+        "push {r0, r1, r2, r3}\n"
+        # le trafic du port de commande (données reçues 08090300, envoyées 08090400) n'est pas
+        # noté : la lecture du journal par le réseau l'écraserait
+        "ldr r3, [r1]\n" + _mw("r2", 0x08090300) + "cmp r3, r2\nbeq nh_skip\n"
+        "add.w r2, r2, #0x100\ncmp r3, r2\nbeq nh_skip\n"
+        + _mw("r2", NODE_IDX) + "ldr r3, [r2]\nadds r3, r3, #1\nubfx r3, r3, #0, #9\nstr r3, [r2]\n"
+        + _mw("r2", NODE_RING) + "add r2, r2, r3, lsl #4\n"
+        "ldr r3, [r1]\nstr r3, [r2]\n"
+        "strb r0, [r2, #4]\n"
+        "ldrh r3, [r1, #4]\nstrb r3, [r2, #5]\n"
+        + _mw("r3", A_PWRSEQ) + "ldr r3, [r3]\nstrh r3, [r2, #6]\n"
+        "movs r3, #0\ncmp r0, #4\nbne nh_nodata\nldr r3, [r1, #8]\nldr r3, [r3]\n"
+        "nh_nodata:\n"
+        "str r3, [r2, #8]\n"
+        + _mw("r3", NODE_IDX + 4) + "ldr r3, [r3]\nstrh r3, [r2, #12]\n"
+        + _mw("r3", A_PWRZONE) + "ldrb r3, [r3]\nstrb r3, [r2, #14]\n"
+        + _mw("r3", A_OFFFLAGS) + "ldrb r3, [r3]\nstrb r3, [r2, #15]\n"
+        "nh_skip:\n"
+        "pop {r0, r1, r2, r3}\n"
+    )
+
+
+def _diag_log_src():
+    return (
+        "push {r4, r5}\n"
+        + _mw("r4", NODE_IDX) + "ldr r5, [r4]\nadds r5, r5, #1\nubfx r5, r5, #0, #9\nstr r5, [r4]\n"
+        + _mw("r4", NODE_RING) + "add r4, r4, r5, lsl #4\n"
+        "str r0, [r4]\nstrb r1, [r4, #4]\nmovs r5, #0\nstrb r5, [r4, #5]\n"
+        + _mw("r5", A_PWRSEQ) + "ldr r5, [r5]\nstrh r5, [r4, #6]\n"
+        "str r2, [r4, #8]\n"
+        + _mw("r5", NODE_IDX + 4) + "ldr r5, [r5]\nstrh r5, [r4, #12]\n"
+        + _mw("r5", A_PWRZONE) + "ldrb r5, [r5]\nstrb r5, [r4, #14]\n"
+        + _mw("r5", A_OFFFLAGS) + "ldrb r5, [r5]\nstrb r5, [r4, #15]\n"
+        "pop {r4, r5}\nbx lr\n"
+    )
+
+
+def _callback_hook_src(skip_node, op, value):
+    """Détour d'un rappel du module (r0 -> structure commençant par le nœud)."""
+    return (
+        "push {r0, r1, r2, r3, lr}\n"
+        "ldr r3, [r0]\n" + _mw("r2", skip_node) + "cmp r3, r2\nbeq cb_skip\n"
+        + value + f"mov r0, r3\nmovs r1, #{op:#x}\nbl #{DIAG_LOG}\n"
+        "cb_skip:\n"
+        "pop.w {r0, r1, r2, r3, lr}\n"
+    )
+
+
+def _sleep_tick_src():
+    """Tick 1 s. Décompte veille -> éteint, copie du bloc d'origine (0x08010af6..0x08010b3f) ;
+    puis fin de l'extinction profonde si l'ampli est rallumé ; puis push_tick (lr intact)."""
+    return (
+        _mw("r0", A_SLEEPTIMER) + "ldr r1, [r0]\ncmp r1, #0\nbeq st_deep\n"
+        "subs r1, r1, #1\nstr r1, [r0]\nbne st_deep\n"
+        + _mw("r0", A_OFFFLAGS) + "ldrb r1, [r0]\norr r1, r1, #0x80\nstrb r1, [r0]\n"
+        + _mw("r0", A_FLAGS_DDE0) + "ldrb r1, [r0]\nbic r1, r1, #2\nstrb r1, [r0]\n"
+        + _mw("r0", A_PWRDELAY) + "movs r1, #100\nstrb r1, [r0]\n"
+        "st_deep:\n"
+        + _mw("r0", NETSTBY_RAM) + "ldr r1, [r0]\n" + _mw("r2", DEEP_ACTIVE) + "cmp r1, r2\nbne st_push\n"
+        + _mw("r1", A_PWRZONE) + "ldrb r1, [r1]\ntst r1, #2\nbeq st_push\n"
+        "movs r1, #0\nstr r1, [r0]\n"
+        "st_push:\n"
+        f"b.w #{PUSH_TICK}\n"
     )
 
 
@@ -511,9 +777,15 @@ def build_patch1(img, features=frozenset(), version=None):
     features = set(features)
     if "push" in features and not {"getstatus", "keepsleep"} <= features:
         raise ValueError("push nécessite getstatus et keepsleep")
+    if "sleeptimer" in features and "push" not in features:
+        raise ValueError("sleeptimer nécessite push")
+    if "portguard" in features and "push" not in features:
+        raise ValueError("portguard nécessite push (tick 1 s)")
+    if "powerstate" in features and "getstatus" not in features:
+        raise ValueError("powerstate nécessite getstatus")
     if "surround" in features and "getstatus" not in features:
         raise ValueError("surround nécessite getstatus")
-    needs_dispatch = bool(features & {"getstatus", "setvolume", "bluetooth", "netoff", "mute"})
+    needs_dispatch = bool(features & {"getstatus", "setvolume", "bluetooth", "netoff", "mute", "diag"})
     sur = "surround" in features
     legacy = "legacymute" in features
     if legacy and "mute" in features:
@@ -533,7 +805,7 @@ def build_patch1(img, features=frozenset(), version=None):
         put(STR_GETSTATUS, b"get-status\x00")
         put(STR_COMMA, b",\x00")
         put(STR_FWVER, (version or FW_VERSION).encode() + b"\x00")
-        emit = patchlib.asm_thumb(_emit_status_src(sur, legacy), EMIT_STATUS)
+        emit = patchlib.asm_thumb(_emit_status_src(sur, legacy, "powerstate" in features), EMIT_STATUS)
         put(EMIT_STATUS, emit)
     if "setvolume" in features:
         put(STR_SETVOL, b"set-volume\x00")
@@ -554,12 +826,22 @@ def build_patch1(img, features=frozenset(), version=None):
             raise ValueError("keepsleep: instruction inattendue au site du patch")
         patchlib.write_bytes(img, off, patchlib.asm_thumb(f"b #{SLEEP_TICK_AFTER}", SLEEP_TICK_BEQ))
     if "push" in features:
-        put(PUSH_TICK, patchlib.asm_thumb(_push_tick_src(sur, legacy), PUSH_TICK))
+        put(PUSH_TICK, patchlib.asm_thumb(_push_tick_src(sur, legacy, "powerstate" in features), PUSH_TICK))
         off = va_to_off(SLEEP_TICK_BLOCK)
         stock_head = patchlib.asm_thumb("ldr r0, [r0]", SLEEP_TICK_BLOCK + 4)
         if bytes(img[off + 4:off + 6]) != stock_head:
             raise ValueError("push: instructions inattendues au site du tick")
-        hook = patchlib.asm_thumb(f"bl #{PUSH_TICK}\nb #{SLEEP_TICK_AFTER}", SLEEP_TICK_BLOCK)
+        tick = PUSH_TICK
+        if "sleeptimer" in features:
+            tick = SLEEP_TICK
+            put(SLEEP_TICK, patchlib.asm_thumb(_sleep_tick_src(), SLEEP_TICK))
+            if "diag" in features:
+                tick = DIAG_TRACE
+                put(DIAG_TRACE, patchlib.asm_thumb(_diag_trace_src(), DIAG_TRACE))
+        if "portguard" in features:
+            put(PORT_TICK, patchlib.asm_thumb(_port_tick_src(tick), PORT_TICK))
+            tick = PORT_TICK
+        hook = patchlib.asm_thumb(f"bl #{tick}\nb #{SLEEP_TICK_AFTER}", SLEEP_TICK_BLOCK)
         assert len(hook) == 6
         patchlib.write_bytes(img, off, hook)
     if "osdgreen" in features:
@@ -574,20 +856,88 @@ def build_patch1(img, features=frozenset(), version=None):
                 raise ValueError("osdgreen: instruction inattendue dans la boîte de message")
             patchlib.write_bytes(img, off, patchlib.asm_thumb(f"movs r2, #{OSD_MSGBOX_GREEN}", va))
     if "netoff" in features:
-        off = va_to_off(NETOFF_C6_BPL)
-        if bytes(img[off:off + 2]) != patchlib.asm_thumb(f"bpl #{NETOFF_C6_KEEP}", NETOFF_C6_BPL):
-            raise ValueError("netoff: instruction inattendue au pas 0xc6")
-        patchlib.write_bytes(img, off, patchlib.asm_thumb(f"b #{NETOFF_C6_KEEP}", NETOFF_C6_BPL))
-        off = va_to_off(NETOFF_AF_BL)
-        if bytes(img[off:off + 4]) != patchlib.asm_thumb(f"bl #{F_GPIO_CLEAR}", NETOFF_AF_BL):
-            raise ValueError("netoff: instruction inattendue au pas 0xaf")
-        mov = va_to_off(NETOFF_AF_MOV)
-        if bytes(img[mov:mov + 4]) != patchlib.asm_thumb("mov.w r1, #0x200", NETOFF_AF_MOV):
-            raise ValueError("netoff: masque inattendu au pas 0xaf")
-        patchlib.write_bytes(img, mov, patchlib.asm_thumb("mov.w r1, #0x100", NETOFF_AF_MOV))
-        patchlib.write_bytes(img, off, patchlib.asm_thumb(f"bl #{F_GPIO_SET}", NETOFF_AF_BL))
+        # Les trois `bl gpio_clear` qui coupent le module (pas 0xc6 : PD9 puis PD8 ; pas 0xaf : PD9)
+        # passent par le cave : par défaut PD9 est mis à 1, PD8 laissé tel quel, puis PD8 mis à 1
+        # au pas 0xaf (sortie de reset différée) ; extinction profonde : comportement d'origine.
+        keep = {NETOFF_C6_PWR: f"b.w #{F_GPIO_SET}\n",                       # PD9 = 1
+                NETOFF_C6_RST: "bx lr\n",                                      # PD8 intact
+                NETOFF_AF_BL: f"mov.w r1, #0x100\nb.w #{F_GPIO_SET}\n"}         # PD8 = 1
+        gate_va = NET_GATES
+        for va, kept in keep.items():
+            off = va_to_off(va)
+            if bytes(img[off:off + 4]) != patchlib.asm_thumb(f"bl #{F_GPIO_CLEAR}", va):
+                raise ValueError(f"netoff: instruction inattendue en {va:#x}")
+            gate = patchlib.asm_thumb(
+                "push {r2, r3}\n" + _mw("r2", NETSTBY_RAM) + "ldr r2, [r2]\nbic r2, r2, #1\n"
+                + _mw("r3", DEEP_ARMED) + "cmp r2, r3\npop {r2, r3}\n"
+                + f"bne keep\nb.w #{F_GPIO_CLEAR}\nkeep:\n" + kept, gate_va)
+            put(gate_va, gate)
+            patchlib.write_bytes(img, off, patchlib.asm_thumb(f"bl #{gate_va}", va))
+            gate_va += (len(gate) + 3) & ~3
         put(STR_FULLOFF, b"power-full-off\x00")
         put(FULL_OFF, patchlib.asm_thumb(_full_off_src(), FULL_OFF))
+        off = va_to_off(STOP_ENTRY)
+        if bytes(img[off:off + 4]) != patchlib.asm_thumb("push {r7, lr}\nmovs r1, #8", STOP_ENTRY):
+            raise ValueError("netoff: instructions inattendues à l'entrée de la mise en sommeil")
+        moved = patchlib.detour(img, STOP_ENTRY, STOP_GATE)
+        gate = patchlib.asm_thumb(
+            _mw("r0", NETSTBY_RAM) + "ldr r1, [r0]\n" + _mw("r2", DEEP_ACTIVE)
+            + "orr r1, r1, #1\ncmp r1, r2\nbeq go_stop\nbx lr\n"
+            "go_stop:\nstr r2, [r0]\n", STOP_GATE)
+        back = patchlib.asm_thumb(f"b.w #{STOP_ENTRY + len(moved)}", STOP_GATE + len(gate) + len(moved))
+        put(STOP_GATE, gate + moved + back)
+        off = va_to_off(NET_SETUP)
+        if bytes(img[off:off + 4]) != patchlib.asm_thumb("push {r4, lr}\nmovs r4, r0", NET_SETUP):
+            raise ValueError("netoff: instructions inattendues à l'entrée de la reconfiguration réseau")
+        moved = patchlib.detour(img, NET_SETUP, NET_SETUP_GATE)
+        gate = patchlib.asm_thumb(
+            _mw("r1", NETSTBY_RAM) + "ldr r1, [r1]\nbic r1, r1, #1\n" + _mw("r2", DEEP_ARMED)
+            + "cmp r1, r2\nbeq ns_stock\n"
+            + _mw("r1", A_PWRZONE) + "ldrb r1, [r1]\ntst r1, #2\nbne ns_stock\n"
+            "bx lr\n"
+            "ns_stock:\n", NET_SETUP_GATE)
+        back = patchlib.asm_thumb(f"b.w #{NET_SETUP + len(moved)}", NET_SETUP_GATE + len(gate) + len(moved))
+        put(NET_SETUP_GATE, gate + moved + back)
+    if "diag" in features:
+        if "getstatus" not in features:
+            raise ValueError("diag nécessite getstatus")
+        put(STR_PEEK, b"debug-peek\x00")
+        put(STR_POKE, b"debug-poke\x00")
+        put(DIAG, patchlib.asm_thumb(_diag_src(), DIAG))
+        if bytes(img[va_to_off(NODE_SEND):va_to_off(NODE_SEND) + 4]) != patchlib.asm_thumb(
+                "push.w {r4, r5, r6, r7, r8, sb, sl, lr}", NODE_SEND):
+            raise ValueError("diag: prologue inattendu de l'envoi au module")
+        moved = patchlib.detour(img, NODE_SEND, NODE_HOOK)
+        hook = patchlib.asm_thumb(_node_hook_src(), NODE_HOOK)
+        back = patchlib.asm_thumb(f"b.w #{NODE_SEND + len(moved)}", NODE_HOOK + len(hook) + len(moved))
+        put(NODE_HOOK, hook + moved + back)
+        put(DIAG_LOG, patchlib.asm_thumb(_diag_log_src(), DIAG_LOG))
+        for at, cave, prologue, skip, op, value in (
+                (NOTIF_CB, NOTIF_HOOK, "push {r3, r4, r5, r6, r7, lr}\nmovs r4, r0", 0x08090300, 0xc6,
+                 "ldr r2, [r0, #8]\nldrb r2, [r2]\n"),
+                (WRITE_CB, WRITE_HOOK, "push {r4, r5, r6, lr}\nmovs r4, r0", 0x08090400, 0x84,
+                 "ldrb r2, [r0, #0xc]\n")):
+            if bytes(img[va_to_off(at):va_to_off(at) + 4]) != patchlib.asm_thumb(prologue, at):
+                raise ValueError(f"diag: prologue inattendu du rappel {at:#x}")
+            moved = patchlib.detour(img, at, cave)
+            hook = patchlib.asm_thumb(_callback_hook_src(skip, op, value), cave)
+            back = patchlib.asm_thumb(f"b.w #{at + len(moved)}", cave + len(hook) + len(moved))
+            put(cave, hook + moved + back)
+    if "portguard" in features:
+        if bytes(img[va_to_off(PORT_WRITE):va_to_off(PORT_WRITE) + 4]) != patchlib.asm_thumb(
+                "push {r4, lr}\nsub sp, #8", PORT_WRITE):
+            raise ValueError("portguard: prologue inattendu de l'écriture du port")
+        moved = patchlib.detour(img, PORT_WRITE, PORT_GUARD)
+        hook = patchlib.asm_thumb(_port_guard_src(), PORT_GUARD)
+        back = patchlib.asm_thumb(f"b.w #{PORT_WRITE + len(moved)}", PORT_GUARD + len(hook) + len(moved))
+        put(PORT_GUARD, hook + moved + back)
+        if bytes(img[va_to_off(NET_IFACE):va_to_off(NET_IFACE) + 4]) != patchlib.asm_thumb(
+                "push {r3, r4, r5, lr}\nmovs r4, r0", NET_IFACE):
+            raise ValueError("portguard: prologue inattendu de l'écriture de l'interface réseau")
+        moved = patchlib.detour(img, NET_IFACE, IFACE_HOOK)
+        hook = patchlib.asm_thumb(_iface_hook_src(), IFACE_HOOK)
+        back = patchlib.asm_thumb(f"b.w #{NET_IFACE + len(moved)}", IFACE_HOOK + len(hook) + len(moved))
+        put(IFACE_HOOK, hook + moved + back)
     if needs_dispatch:
         displaced = patchlib.detour(img, CMD_DISPATCH, CAVE_DISPATCH)
         part1 = patchlib.asm_thumb(_cave_dispatch_part1(features), CAVE_DISPATCH)

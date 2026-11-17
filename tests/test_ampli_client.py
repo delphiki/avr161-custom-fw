@@ -180,3 +180,11 @@ def test_selectable_modes_are_the_ones_a_5_1_amp_cycles_through():
 def test_every_selectable_mode_lists_codes_that_carry_its_name():
     for name, codes in ampli.SURROUND_CHOICES.items():
         assert codes and all(ampli.SURROUND_MODES[c] == name for c in codes)
+
+
+def test_parse_status_tells_sleep_from_off():
+    # firmware >= 1.2.0 : 5e champ 1 = allumé, 2 = en veille, 0 = éteint
+    on, asleep, off = (ampli.parse_status(f"90,0,2,1.2.0,{p}") for p in (1, 2, 0))
+    assert (on["power"], on.get("sleep")) == (True, None)
+    assert (asleep["power"], asleep.get("sleep")) == (False, True)
+    assert (off["power"], off.get("sleep")) == (False, None)

@@ -738,3 +738,483 @@ requête minimale sans en-têtes HTTP.
   Push mesuré, délai entre la commande et le message spontané : surround 0,7 s (22 puis auto),
   source 0,6 à 0,9 s (Disc puis MHL), mise en veille 2,5 s (champ alimentation à 0), allumage
   1,1 s. Mute : aucun message, comme attendu avec le mauvais indicateur de cette image.
+
+### Essais sur matériel de la v1.2.0-test (2026-11-14)
+- Mute validé : champ à 1 après `mute-on`, à 0 après `mute-off` ; chaque changement est poussé ;
+  `mute-on` et `mute-off` envoyés une seconde fois ne font rien ; `mute-toggle` bascule.
+- `power-full-off` : le champ alimentation passe à 0, la façade s'éteint (pas de « Device
+  Sleep »). **Le module réseau reste alimenté** : ping et connexion TCP au port 10025 acceptés
+  pendant toute la mesure (140 s). `get-status` répond encore à +8 s et +15 s, puis plus
+  rien : la connexion est acceptée mais aucune réponse.
+- Cause : FUN_080146b4, appelée quand `0x2000e1d3` (posé à 7 au pas 0xaf) ou `0x2000e1d4`
+  arrive à zéro. Elle coupe PG3, configure des interruptions externes de réveil
+  (FUN_08014704), puis FUN_08065580(1,1) met le MCU en **mode STOP** (PWR_CR, SLEEPDEEP, WFI).
+  Au réveil : FUN_08014874 puis FUN_08065f74 (remise en route des horloges).
+  Un gestionnaire en 0x08074160 réarme `e1d4 = 20` et `e1d3 = 7` quand l'ampli est éteint :
+  le MCU se rendort après chaque réveil. C'est ce sommeil qui tient la promesse des 0,5 W.
+- Suite (v1.2.1-test, non flashée) : entrée de FUN_080146b4 détournée vers le cave (+0x680).
+  Si le mot en RAM `0x2001ff08` vaut `NETS` (0x4e455453), retour immédiat sans sommeil ; sinon
+  comportement d'origine. `power-full-off net` pose le mot, `power-full-off` seul l'efface.
+  Le mot disparaît à la coupure secteur : filet de sécurité si le MCU éveillé se bloque
+  (HDMI et DSP ne sont plus alimentés dans cet état, jamais exercé longtemps par le
+  firmware d'origine).
+- Rallumage par télécommande depuis « éteint, module resté alimenté, MCU endormi » : l'ampli
+  se rallume du premier coup, mais le port de commande accepte la connexion sans jamais
+  répondre. Le firmware d'origine compte sur le redémarrage du module à l'allumage pour
+  rejouer l'ouverture du port ; un module resté seul pendant le sommeil du MCU garde des
+  échanges en suspens. Conclusion : ne jamais laisser le module alimenté quand le MCU dort.
+- v1.2.2-test (remplace la v1.2.1-test, jamais flashée) : les trois `bl gpio_clear` du
+  module passent par des portes du cave (+0x6c0) conditionnées par le même indicateur RAM.
+  Sans lui, séquence d'extinction strictement d'origine ; avec lui, module alimenté et MCU
+  éveillé.
+
+### Essais sur matériel de la v1.2.2-test (2026-11-14) : éteint ET joignable
+- Après flash et 2 min 30 : port sain, `fw 1.2.2-test`.
+- `power-full-off net` : 18 lectures `get-status` réussies sur 18 de +9 s à +160 s, ping constant ;
+  façade vide et voyant orange constatés par le propriétaire (état éteint, pas « Device Sleep »).
+  Toujours joignable plusieurs minutes plus tard.
+- `power-on` par le réseau depuis cet état : ampli annoncé allumé en moins de 3 s.
+  Une lecture a expiré ~15 s après l'allumage (un ping perdu au même moment), puis 12 lectures
+  réussies sur 12 pendant 80 s. Cause de ce trou non établie.
+- Reste à faire : tenue sur plusieurs heures ; consommation ; rendre le comportement permanent
+  (y compris au rebranchement secteur et sur l'ordre de veille HDMI-CEC) ; remettre la
+  temporisation veille -> éteint.
+
+## Éteint joignable : essai d'une nuit et version candidate (2026-11-14)
+
+### Mesure matériel, v1.2.2-test
+- `power-full-off net` à 01:04, surveillance passive 8 h : 480 pings sans perte, 32 lectures
+  `get-status` sur 32 (une par quart d'heure), toutes `power=False`.
+- 09:05 : `power-on` par le réseau -> ampli allumé ; `power-full-off net` -> de nouveau éteint
+  et joignable. Les délais de cette vérification ne sont pas exploitables (le Mac s'endormait).
+- Non mesuré : consommation dans cet état ; comportement au rebranchement secteur.
+
+### v1.2.3-test (features netoff + sleeptimer), non flashée à cette date
+- L'état éteint joignable devient le comportement PAR DÉFAUT de toute extinction complète
+  (fin de temporisation, ordre de veille HDMI-CEC, `power-full-off`, démarrage après
+  rebranchement) : module alimenté (PD9 = 1, sortie de reset au pas 0xaf), MCU jamais en STOP.
+- `power-full-off deep` : extinction d'origine (module coupé, MCU en STOP). Indicateur RAM
+  0x2001ff08 : DEEP_ARMED (0x44454550) à la commande, DEEP_ACTIVE (|1) au premier passage en
+  STOP, effacé par le tick 1 s dès que l'ampli est rallumé. Il survit aux réveils du MCU sans
+  allumage : FUN_080146b4 n'est appelée qu'à l'expiration des compteurs 0x2000e1d3 / e1d4
+  (0x08010c32, 0x080126c6), donc une fois par endormissement.
+- sleeptimer : décompte veille -> éteint (3600 s) rétabli à l'identique du bloc d'origine, dans
+  le cave (+0x780), avant push_tick. `power-full-off` remet le compteur à 0 pour que le
+  décompte ne relance pas une extinction sur un ampli déjà éteint.
+- HDMI-CEC : aucun patch. L'ordre de veille de la télé éteint toujours l'ampli directement,
+  mais « éteint » est maintenant joignable.
+- À valider sur matériel : veille -> éteint au bout d'une heure, extinction par la télé,
+  rebranchement secteur (le module démarre-t-il et le port 10025 s'ouvre-t-il sans que l'ampli
+  ait été allumé ?), `power-full-off deep` puis rallumage à la télécommande.
+
+### Perte du module à la fin de la temporisation de veille (2026-11-14 et 15, v1.2.3-test)
+- Constat : ampli éteint et joignable -> `power-on` par le réseau -> `power-off` 9 s après ->
+  veille joignable pendant une heure -> à la fin de la temporisation, plus de ping ni d'ARP,
+  façade éteinte, voyant orange ; la télécommande rallume l'ampli. Vu le 14 à 21:40 (via Home
+  Assistant) et reproduit le 15 : `power-off` à 12:35:13, ping perdu à 13:35:18 (t+60,1 min).
+- Contre-exemple : le 14, veille à 14:09 après 10 min de marche (allumage depuis la veille, pas
+  depuis l'éteint), temporisation échue à 15:09, module resté joignable jusqu'à 20:40.
+- Les extinctions complètes par commande (`power-full-off`) n'ont jamais perdu le module (8 h
+  la nuit du 14, plusieurs essais courts).
+- Lecture statique, rien de concluant : la commande et la temporisation font les trois mêmes
+  écritures (dddc |= 0x80, dde0 &= ~2, e1dd = 100) ; seule la commande écrit l'indicateur
+  0x2001ff08. Sites qui coupent PD9 / PD8 hors portes : FUN_0802f15a (allumage, si
+  `ddd8 & 0x30`) et FUN_08040662 état 4 (lecture de fichier, mise à jour).
+- `ddd8` bits 4 et 5 = mises en protection (FUN_08013060 : moyenne d'une mesure < 0x621 ;
+  FUN_08013858 : PE3 bas 12 tics), elles appellent FUN_08018ca4. `ddf4` bit 6 = allumage après
+  protection, effacé au pas 0x9b.
+- Pas 0xaf, extinction complète : lit PG14 ; à 0 -> PG5 (POWER_HIGH) = 1, PG6 (PWR_SW3) = 1,
+  PE8 (EN_VBUS) = 0 ; à 1 -> PG5 = 0, PG6 = 0, PE8 = 1. Seule dépendance à une entrée dans ce
+  pas ; rôle de PG14 non établi. Piste non vérifiée : alimentation de veille en mode réduit.
+- Hypothèses à départager sur matériel : extinction 9 s après l'allumage ; allumage depuis
+  l'état éteint-joignable ; état d'une entrée (PG14) au moment de l'extinction.
+- Outil : feature `diag` (images de test seulement, jamais publiée), `debug-peek <adresse
+  décimale>` répond les 4 octets lus, `debug-poke <valeur>` écrit le mot à l'adresse mémorisée
+  (RAM seulement). Permet de ramener la temporisation `0x2000dd7c` à quelques secondes et de
+  relever drapeaux et ports avant la coupure. Image `out/AVR1610_patch1_v1.2.4-diag.fw`.
+
+### Port 10025 fermé après un démarrage à froid (2026-11-15, v1.2.4-diag puis v1.2.3-test)
+- Constat : après le flash de la v1.2.4-diag (clé restée branchée, façade sur FM alors que la
+  télé montrait l'Apple TV), puis après un rebranchement secteur, puis après reflash de la
+  v1.2.3-test (clé retirée, ampli rallumé seul) : ping et port 8080 du module OK, port 10025
+  refusé, y compris après un cycle veille -> allumage à la télécommande. L'image diag n'est
+  donc pas en cause. Après un rebranchement suivi d'un allumage rapide à la télécommande
+  (délai non mesuré), le port s'est ouvert (17:14).
+- Épisode non expliqué : à 16:05, après le premier rebranchement, le module a pris l'adresse
+  169.254.50.219 puis n'a plus répondu ; revenu en 192.168.1.58 après le reflash.
+- Lecture du code : `0x2000dfd2` (décompte de FUN_08091698, qui finit par `e2a7 = 200` puis
+  l'écriture du port) n'est armé que par des notifications d'état réseau du module
+  (FUN_08092630, FUN_080929e0 : 700 ou 1000 si `*0x2000e141 != 0` ; FUN_08072a40 ;
+  FUN_08046134). FUN_08049e40 (mise en veille, appelée par FUN_08018ca4) le remet à 0.
+- Hypothèse (cohérente avec l'essai, non prouvée) : avec netoff le module démarre dès le
+  branchement secteur ; si sa notification « connecté » arrive ampli éteint, la passe
+  d'ouverture est perdue ou annulée, et rien ne la relance. À vérifier avec l'image diag
+  (lecture de dfd2, e2a7, e141 après un démarrage à froid).
+
+### Essais avec les images diag (2026-11-15, 17:35 -> 19:05)
+- v1.2.4-diag puis v1.2.5-diag (anneau de trace `0x2001fc00`, 64 entrées d'une seconde, figé
+  ampli allumé). Lecture mémoire validée (SP initial, volume, bit d'alimentation).
+- Port 10025 : rouvert à chaque fois par un débranchement / rebranchement du câble Ethernet
+  ampli allumé (3 fois sur 3). Confirme que l'ouverture dépend d'une notification de connexion
+  reçue ampli allumé. Après un rallumage à la télécommande depuis l'état « module tombé », le
+  port s'est ouvert seul une fois (18:09) et pas une autre (18:54).
+- Tempo ramenée à 10-15 s par `debug-poke` sur `0x2000dd7c` :
+  - rallumage télécommande -> `power-off` -> tempo : module resté joignable (17:47), état
+    final identique à un `power-full-off` direct (PD = 0x8300, de40 = 0x40) sauf dde0 = 1.
+  - `power-full-off` -> `power-on` réseau -> `power-off` 9 s après -> tempo : module tombé
+    2 à 3 s après l'échéance, 4 fois sur 4 (17:38, 18:01, 18:10, 18:53).
+  - extinction par tempo -> `power-on` réseau : port 10025 refusé, ping OK (17:48).
+- Trace relue après la coupure de 18:53 : pendant les 64 s précédant le rallumage, MCU en
+  marche (tic 1 s), PD9 = 1, PD8 = 1, broches en sortie, dddc = 0, dd5c = 0, GPIOG ODR = 0.
+  **Le MCU ne coupe donc ni l'alimentation ni le reset du module** ; l'indicateur 0x2001ff08
+  valait 0. Reste : un ordre envoyé au module, ou une autre sortie (ports A, B, C, E, F non
+  tracés).
+- Lecture : FUN_08047a1c (extinction complète) et FUN_08047e34 (allumage après protection)
+  remettent à zéro tout l'état du module côté MCU ; FUN_08049e40 (veille) en remet une partie
+  et annule la passe d'ouverture du port. Le firmware d'origine suppose le module coupé à
+  l'extinction et redémarré à l'allumage ; avec netoff les deux côtés se désynchronisent.
+- Pistes de correction, non essayées : (a) à l'allumage depuis l'éteint, redémarrer le module
+  comme le fait l'origine après une protection (FUN_080481cc), au prix d'environ 30 s sans
+  réseau ; (b) ne pas faire l'extinction complète hors `deep` (rester en veille, comme la
+  v1.1.0) ; (c) tracer tous les ports pour comparer l'état « bon » et l'état « tombé ».
+
+### Journal des requêtes vers le module (2026-11-15 soir, v1.2.6-diag puis v1.2.7-diag)
+- Feature `diag` étendue : détour de FUN_08073984 (point de passage de toutes les requêtes :
+  r0 = 0 lire / 4 écrire / 6 notifications, r1 = {nœud, longueur, données}) vers un anneau de
+  512 entrées en `0x2001c000` (indice en `0x2001bff8`, secondes en `0x2001bffc`) ; ODR des
+  ports A..G au dernier tic éteint en `0x2001fe10`. La v1.2.6 notait aussi 08090300 /
+  08090400 : la lecture du journal par le réseau l'écrasait (2 requêtes par lecture). La
+  v1.2.7 les ignore.
+- État « module tombé » : ODR des sept ports identiques à l'état éteint-joignable sain
+  (A 0, B 0, C 0x180, D 0x8300, E 0x100, F 0x2000, G 0). Aucune cause électrique côté MCU.
+- Extinction directe (`power-full-off`) : aucune requête envoyée au module (hors port de
+  commande), deux essais.
+- Démarrage à froid (flash de 21:59) : 01020000 <- 1, 08010000 <- 0, 09010000 <- 0,
+  notifications 06030300 / 06060100 / 0d020000, 05090000 <- 4, 0d010000 <- 1, lecture
+  01030000, 08010000 <- 1, notification 08040b00, 08040a00 <- 2, 08040403, puis **écriture du
+  port 08090100 <- 10025 à +28 s et +32 s, sans effet** (port refusé). Après rebranchement du
+  câble Ethernet : lecture de 08040902..906, 901, 800, puis 08090100 <- 10025 et notification
+  08090200 : port ouvert. Le défaut du démarrage à froid est donc une écriture du port faite
+  avant que le module soit prêt, jamais rejouée.
+- 01020000 n'est écrit que par FUN_08094356, appelée par FUN_08074eac (initialisation) :
+  pas un ordre d'extinction.
+- Essai de 22:12 (scénario qui casse) : module tombé ; après rallumage à la télécommande,
+  port refusé ; après rebranchement Ethernet, port ouvert mais **aucune réponse du MCU**
+  (heart-alive, get-status), y compris après arrêt du client Home Assistant, un
+  cycle veille -> allumage à la télécommande et un second rebranchement. Journal non lu.
+  État jamais vu auparavant ; piste : file des requêtes en attente (20 entrées en
+  0x2000a6a8) saturée.
+
+### Cause du module qui tombe : reconfiguration réseau lancée ampli éteint (2026-11-15, 22:55)
+- Journal du scénario qui casse (v1.2.7-diag ; `power-full-off` -> `power-on` -> `power-off`
+  9 s après -> tempo), au début de l'extinction complète, dddc = 0x80, ampli éteint :
+  dd5c 300 : 08010000 <- 0 ; 298 : 09010000 <- 0 ; 271..268 : notifications 06030300,
+  06060100, 0d020000 ; 266 : 05090000 <- 4 ; 265 : 0d010000 <- 1 ; 263 : lecture 01030000 ;
+  puis plus rien. Au démarrage ou à l'allumage, la même séquence continue par 08010000 <- 1
+  deux à trois secondes plus tard, puis 08040b00, 08040a00 <- 2, 08040403, et l'ouverture du
+  port. **08010000 = interface réseau du module (0 coupée, 1 active).** Module alimenté, PD9 /
+  PD8 à 1, mais absent du réseau. Le rallumage à la télécommande rejoue la séquence entière.
+- Chaîne : FUN_08087304(v) écrit 08010000. La valeur 0 ne vient que du décompte `0x2000df86`
+  (FUN_08075404, à 200), armé à 0xca par FUN_08075374 <- FUN_08075368 <- **FUN_08074ef2(1)**.
+  Appelants : FUN_08094a84 sur les événements 0x900 / 0x901 (FUN_08094380, appelée par
+  FUN_08046134 quand `0x2000decc` ou `0x2000ded4` arrive à zéro), et FUN_0802ff7c (analyse des
+  trames du module) sur la notification d'état 0101 = 2 ou 3 quand `0x2000e16b == 1`.
+- Origine de la demande : pas d'allumage FUN_080481d8, si `0x2000e232 == 0` (module pas vu
+  « prêt » ; FUN_08047a1c le remet à 0 à chaque extinction complète) -> `0x2000dec8 = 800`
+  (8 s), puis `decc = 3`, puis l'événement. Le firmware d'origine suppose un module qui vient
+  de démarrer. Ce qui retient la demande pendant la veille et la libère à l'extinction
+  complète n'est pas établi.
+- Port fermé au démarrage à froid : même famille. L'écriture du port suit de peu
+  08010000 <- 1 ; si le module n'a pas encore sa connexion, elle échoue, et seule une
+  notification de connexion relance la passe.
+- Correctif candidat (feature netoff, v1.2.8-diag, NON validé sur matériel) : porte à
+  l'entrée de FUN_08074ef2 ; hors extinction profonde, retour immédiat si l'ampli n'est pas
+  allumé (bit 1 de 0x2000ddd4). Tests : test_netoff.py (reconfiguration réseau).
+  Limite connue : une séquence lancée ampli allumé puis interrompue par une extinction dans
+  les 3 s reste possible ; à surveiller.
+
+### Correctif validé sur matériel : v1.2.8-diag (2026-11-15, 23:17 -> 23:25)
+- Scénario qui cassait (`power-full-off` -> `power-on` réseau -> `power-off` 9 s après ->
+  tempo ramenée à 10 s) : extinction complète déroulée (dd5c 284 -> 0, PD = 0x8300), module
+  resté joignable, **aucune requête envoyée au module** pendant l'extinction (journal).
+- `power-on` réseau depuis cet état : la reconfiguration part ampli allumé, 18 à 26 s après
+  l'allumage, et va au bout : 08010000 <- 0 ... 08010000 <- 1 (3 s), lecture de la
+  configuration IP, 09010000 <- 1, 08090100 <- 10025. `get-status` répond ensuite. Pendant
+  ces quelques secondes l'ampli est injoignable : c'est l'origine des lectures ratées
+  constatées 15 à 30 s après chaque allumage.
+- `power-off` 6 s après la fin de la reconfiguration : l'écriture du port tombe pendant la
+  séquence de mise en veille (dd5c = 196), sans conséquence.
+- Non corrigé : port 10025 fermé après un démarrage à froid (ouvert une seconde à 23:13:31
+  puis refusé ; rouvert par un rebranchement Ethernet).
+- Non testé : extinction pendant les 3 s où l'interface est coupée ; rebranchement secteur
+  sans allumage ; `power-full-off deep` ; veille de la télé (CEC).
+- Nuit du 15 au 16 : surveillance passive lancée à 23:26, ampli en veille, tempo réelle de
+  3600 s (échéance vers 00:24), client Home Assistant arrêté.
+- Nuit du 15 au 16, relevé à 01:53 : usage réel 23:25 -> 00:15, veille à la télécommande,
+  temporisation de 3600 s échue vers 01:15, ampli éteint et joignable ensuite (ODR et de40
+  de l'état éteint-joignable, aucune requête au module depuis l'allumage). Aucun ping perdu.
+
+### Port 10025 fermé après un démarrage à froid : analyse et image v1.2.9-diag (2026-11-16)
+- Le journal du démarrage à froid (flash de 23:13) et celui d'un allumage réseau depuis
+  l'éteint-joignable (qui marche) montrent **les mêmes requêtes, au même rythme** : 08010000
+  <- 1, puis 08090100 <- 10025 deux fois (11 s et 13 s plus tard). La différence est donc côté
+  module. À froid le port s'est ouvert une seconde (23:13:31, juste après la 2e écriture) puis
+  a été refusé : l'écriture aboutit, c'est ensuite que le port se referme.
+- Rappel des notifications = 0x0808671c (pas une fonction pour Ghidra). 08040b00 (état du
+  réseau filaire) : 0 / 1 -> événements 0x607 / 0x608, **2 = connecté** -> si `0x2000e138 == 0`
+  appel de FUN_08092630, puis `e138 = 1` ; 0x64 / 0x65 -> 0x60b / 0x60c. 08090200 -> `e2a8`.
+- FUN_08092630 (la seule relance sur connexion) ne fait rien si l'ampli n'est pas allumé
+  (bit 1 de ddd4) et n'arme `dfd2` que si `0x2000e141 != 0`. Une connexion établie ampli éteint
+  (rebranchement secteur sans allumage) ne rouvre donc jamais le port ; et la relance n'a lieu
+  qu'au front `e138` 0 -> 1.
+- Rappel des écritures = 0x080866d0 : ne regarde l'état (`+0xc`) que pour 08030402 / 08030404.
+- Vérifié en émulation sur la routine d'origine FUN_08087bd4 : `e2a7 = 200` -> écriture du port
+  50 tics plus tard, notifications 08090200 à 100, 08090300 à 150. FUN_08087bd4 est appelée
+  par FUN_08044eb4 <- FUN_08047360 (tic réseau, tourne quel que soit l'état d'alimentation).
+- Pas établi : ce qui referme le port côté module (connexion d'un client avant l'activation
+  des notifications ? fin du démarrage du module ? changement d'adresse ?).
+- Feature `portretry` (tests : test_portretry.py) : dans la chaîne du tic 1 s, toutes les 32 s,
+  `e2a7 = 200` si aucun client (`e2a8 == 0`), aucune passe en cours (`e2a7 == 0`) ni programmée
+  (`dfd2 == 0`), et hors extinction profonde. Compteur en `0x2001ff10`. NON validée sur
+  matériel. Limite connue : si `e2a8` reste non nul après la disparition d'un client, pas de
+  relance.
+- Feature `diag` étendue : le journal note aussi ce que le module renvoie, notifications
+  (opération 0xc6, valeur = 1er octet) et accusés d'écriture (0x84, valeur = état), hors
+  08090300 / 08090400.
+- Image `out/AVR1610_patch1_v1.2.9-diag.fw` (sha256 4e888bf9...), NON flashée. Essais prévus :
+  flash sans sonder le port pendant 3 min ; rebranchement secteur + télécommande en sondant ;
+  rebranchement secteur sans allumer. Lire le journal après chacun.
+- Lecture complémentaire (2026-11-16, 02:30), pistes écartées ou non tranchées :
+  - `0x2000e141` = 1er octet du nœud 08040901 (ou 08030901), lu par la chaîne `dfd2` ;
+    `0x2000e292` en est l'inverse. Probablement « adressage automatique » ; écrit aussi par
+    FUN_080478fc et par la routine des réglages IP (`net_bye_bye_push`, mal nommée : elle
+    applique la configuration IP après le bye-bye). Sur cet ampli (DHCP) il est non nul une
+    fois lu, donc la relance sur connexion est bien armée ampli allumé.
+  - `net_send` n'a que deux appelants d'origine (cmd_dispatch, réglages IP) ; notre push en est
+    un troisième. Un push émis sans client connecté arrive tous les jours (commande puis
+    déconnexion, tic une seconde après) sans fermer le port : pas la cause en régime établi.
+    Après un flash la RAM est conservée (le journal d'avant flash est resté lisible), donc
+    l'état du push aussi : un push peut partir pendant le démarrage. Non observable dans les
+    journaux v1.2.7 / v1.2.8, qui ignorent 08090400. Non tranché.
+  - Les journaux v1.2.7+ ignorant 08090300, l'absence de « NOTIF 08090300 » après l'écriture
+    du port n'est pas un indice.
+  - Conclusion : côté MCU, les requêtes sont identiques à froid et à chaud ; la suite passe
+    par le journal des notifications reçues (v1.2.9-diag).
+
+## Essais v1.2.9-diag et cause du port fermé (2026-11-16, 10:30–11:15)
+
+- **Essai 1 (flash, aucun sondage 3 min)** : port ouvert à 10:36:09 (get-status OK). Connexion
+  perdue ~10 s plus tard, pendant la lecture du journal ; port refusé ensuite (100 s de sondage),
+  malgré `portretry`. Veille / rallumage à la télécommande : ne rouvre rien (module resté alimenté,
+  la séquence d'ouverture n'est pas rejouée).
+- **Essai 2 (secteur débranché / rebranché, allumage télécommande, un seul client qui attend)** :
+  connexion acceptée à 11:09:47, première lecture `0x2000e2a4 = 0x9e000000` → décompte `e2a7 = 158`,
+  soit 8 tics avant l'écriture de 08090100. Lecture suivante perdue, port refusé jusqu'à la fin
+  (11:11:50).
+- **Conclusion** : écrire 08090100 pendant qu'un client est connecté coupe le client et laisse le
+  port fermé. Le firmware d'origine l'écrit deux fois à ~2 s d'écart au démarrage : un client qui
+  se connecte entre les deux (sonde, Home Assistant) déclenche le défaut. `portretry` reproduisait
+  la même chose à chaque relance → **retiré des images** (code encore présent, à supprimer une
+  fois le correctif validé). La nuit sur v1.2.8 était stable parce que rien ne réécrivait le port.
+- **Non établi** : pourquoi le port ne revient pas ensuite ; si `e2a8` est déjà non nul quand la
+  deuxième écriture part (la notification 08090200 n'est activée qu'au décompte 100 de la
+  première passe).
+- **v1.2.10-diag** (non flashée, sha256 b123d6ed…c5d005) : v1.2.8-diag + journal des notifications
+  et accusés + `portguard` (détour de FUN_08087d9c, 0x08087d9c → cave+0xe00 : retour immédiat si
+  `e2a8 != 0`). Tests : `tests/test_portguard.py`, suite 268/268.
+
+### v1.2.10-diag : port jamais ouvert, sens de `e2a8` inversé (12:05)
+
+- Flash de v1.2.10-diag puis démarrage à froid : module joignable (ping, 8080) dès 11:58, port 10025
+  refusé en continu, sans qu'aucun client se soit connecté.
+- Cause : `0x2000e2a8` vaut **1 à l'initialisation** (`movs r1,#1 ; strb` en 0x0804812e et
+  0x08048362) et la notification 08090200 le met à **0 quand un client se connecte** (d'où le
+  `df9e = 10` qui réactive la notification des données entrantes). J'avais lu l'inverse.
+  `portguard` bloquait donc toutes les écritures sans client ; `portretry` (v1.2.9) ne relançait
+  que **lorsqu'un client était connecté**, ce qui explique la coupure de l'essai 1.
+- Un flash ne coupe pas l'alimentation du module : un port mort le reste après le redémarrage.
+- **v1.2.11-diag** (non flashée, sha256 47745e8c…40334c) : garde inversée (retour immédiat si
+  `e2a8 == 0`), 1 octet de différence dans le cave + la version. Suite 269/269.
+- `portretry` : code et tests toujours présents avec la condition à l'envers ; à supprimer.
+
+### v1.2.11-diag validée à froid (12:16–12:35)
+
+- Flash, secteur débranché / rebranché, allumage télécommande, un client en attente.
+- Journal : `08010000 ← 1`, 10 s plus tard `ECRIRE 08090100` (12:16:50), client connecté à 12:16:53
+  (`<-NOTIF 08090200 = 0`, `e2a8 = 0`), deuxième passe 4 s après la première : notifications
+  08090200 / 08090300 réactivées, **pas de seconde écriture de 08090100** (garde active).
+  Connexion conservée. `<-NOTIF 08090200` : 0 à la connexion, 1 à la déconnexion (sens confirmé).
+- Coupure inexpliquée ~12:17:30–12:18:10 (ping perdu aussi, aucun échange MCU ↔ module, pas de
+  notification de déconnexion) ; reconnexion acceptée ensuite.
+- Surveillance 15 min ensuite : 0/180 ping perdu, 15/15 lectures d'état.
+- Reste : portretry à supprimer, image de release sans diag, essais « rebranché sans rallumer »,
+  « rallumage tardif », extinction pendant la fenêtre de configuration, `power-full-off deep`.
+
+### Port mort à l'allumage depuis l'éteint, client connecté (17:45) → v1.2.12-diag
+
+- Home Assistant connecté en permanence (une seule connexion gardée ouverte ; le module refuse
+  alors tout autre client : « refusé » ne veut donc pas dire « port mort »). Ampli éteint-joignable,
+  allumage : HA « allumé » 17:44:50, « indisponible » 17:45:27, port refusé ensuite. Journal perdu
+  (une coupure secteur de 5 s efface la RAM ; l'indice repart vers 95 à chaque démarrage).
+- Explication retenue (non lue dans un journal) : l'allumage depuis l'éteint relance l'interface
+  réseau (08010000 ← 0 puis ← 1, 18 à 26 s après l'allumage, déjà noté le 15). Le client tombe sans
+  notification 08090200, `e2a8` reste à 0, et `portguard` court-circuite l'écriture du port qui suit.
+- **v1.2.12-diag** (non flashée, sha256 b35823e9…47cac2) : détour de FUN_08087304 (0x08087304 →
+  cave+0xe40) qui remet `e2a8 = 1` à chaque écriture de 08010000 ; + feature `powerstate`.
+- **powerstate** : 5e champ de get-status = 1 allumé, 2 en veille, 0 éteint. Veille = bit 1 de
+  `0x2000dde0` (lu sur matériel : allumé 0x40, veille 0x03 avec dd7c = 0xe02, éteint 0x01 avec
+  dd7c = 0). Sans la feature, 0 dans les deux cas (images publiées reconstructibles).
+  `ampli.py` mis à jour. Suite firmware 262/262, client 39/39.
+- La commande brute `sleep` est la minuterie d'arrêt de la télécommande (dddc passe à 0x40), pas la
+  mise en veille ; envoyée une fois par erreur à 18:05, effacée par l'extinction / allumage suivant.
+
+### v1.2.12-diag sur matériel (18:44–18:48)
+
+- Scénario de 17:44 rejoué avec un client qui garde sa connexion : `power-off`, `power-full-off`,
+  `power-on` ; connexion perdue à +31 s (relance de l'interface), **reconnexion acceptée 3 s plus
+  tard**, stable ensuite (100 s). Le correctif `e2a8 = 1` sur écriture de 08010000 tient.
+- powerstate : `get-status` renvoie bien 1 / 2 / 0. Le bit « veille » (dde0 bit 1) n'apparaît que
+  2 à 3 s après la sortie de l'état allumé, donc l'état poussé à ce moment dit « éteint », et ni
+  ce passage ni veille → éteint n'étaient poussés (bit hors de l'état surveillé).
+- **v1.2.13-diag** (non flashée, sha256 d84374bb…745a0b) : le bit veille entre dans l'état surveillé
+  par push_tick (bit 10 du mot mémorisé). Suite 269/269.
+- Mesure : les lectures debug-peek en rafale se décalent d'une réponse quand une requête est
+  perdue (colonnes glissées dans e9) ; un état poussé peut aussi être lu comme réponse à get-status.
+
+### Port mort après un allumage depuis l'éteint, HA connecté (20:33) → v1.2.14-diag
+
+- Historique HA : veille 19:44:55, éteint 20:32:24 (fin de l'heure de veille), allumé à la
+  télécommande 20:32:38, indisponible 20:33:14. Port refusé en continu ensuite (60 s d'essais),
+  ping OK.
+- Port rouvert **sans coupure secteur** à 22:28 en revalidant la configuration dans le menu
+  Réseau de l'ampli (08010000 ← 1, puis 08090100 ← 10025) : RAM et journal conservés.
+- Journal (heures recalées sur la connexion de 22:28:08) : 20:32:55 `08010000 ← 0`, 20:32:58
+  `← 1`, 20:33:00 `08040b00 = 0`, 20:33:08 `ECRIRE 08090100` (acquittée) + abonnement 08090200,
+  `08040b00 = 2`, 20:33:10 **seconde `ECRIRE 08090100`** (acquittée). Aucune notification 08090200
+  ensuite pendant 1 h 55.
+- Même relance à 19:12 (essai réussi) : `08040b00 = 2`, écriture, `<-NOTIF 08090200 = 1`, seconde
+  écriture 2 s après, HA (alors indisponible, un essai toutes les 10 s) reconnecté 8 s plus tard.
+  Relance de 19:02 avec un client qui réessaie sans arrêt : une écriture, client connecté 3 s
+  après, seconde passe court-circuitée par la garde.
+- Explication retenue (non observée directement : pas de notification dans le journal) : un
+  client se connecte entre les deux écritures, avant que 08090200 le signale ; la seconde
+  écriture le coupe et ferme le port (cause 1). Cohérent avec le démarrage à froid du 15
+  (écritures à +28 s et +32 s « sans effet », un lecteur réessayait en boucle).
+- **v1.2.14-diag** (sha256 a3fbed7e…6451c5) : `portguard` ne refait pas une écriture du port
+  acquittée (rappel 0x080866d0, nœud 08090100, état 1) pendant 20 s (`0x2001ff10`, décompté par
+  le tick 1 s, remis à 0 par l'écriture de 08010000 ; valeur > 20 = RAM non initialisée, ignorée).
+  portguard nécessite maintenant push. Suite 285/285.
+
+### v1.2.14-diag sur matériel : ampli « sourd » après la relance (22:47) — NON validée
+
+- Flash 22:40, `get-status` OK. Scénario e11 (client qui interroge toutes les 0,5 s et se reconnecte
+  toutes les 0,2 s) : `power-off` 22:47:03, `power-full-off`, `power-on` 22:47:28, connexion perdue
+  à +29 s. Ensuite **connexion TCP acceptée mais aucune réponse**, même à `heart-alive` (pourtant
+  traité avant toute porte « occupé »), pendant 28 min. Clé USB restée dans l'ampli depuis le flash
+  (retirée à 23:03, sans effet). Sortie vidéo vers la télé perdue à un moment non daté.
+- Revalidation du menu Réseau à 22:51:55 : interface relancée, sans effet sur la surdité. Pas
+  d'écriture du port dans cette relance : le lecteur s'est connecté avant l'étape (garde légitime).
+- Reflash v1.2.13-diag à 23:15 (redémarrage du MCU) : répond à nouveau. Le journal survit au flash
+  et l'indice continue (pas de remise à zéro).
+- Journal de la période sourde : à chaque connexion `<-NOTIF 08090200 = 0`, `<-ACK 08090300`, puis
+  `= 1` à la déconnexion. Le module signale donc les clients et acquitte les abonnements ; c'est le
+  MCU qui ne traite plus les données reçues ou n'envoie plus ses réponses (08090300 / 08090400 hors
+  journal). FUN_08087e0c (envoi) et le rappel 0x080864b8 (réception) n'ont pas de drapeau
+  « occupé » propre ; cause non trouvée.
+- Lecture du code : la passe d'ouverture (FUN_08087bd4, décompte e2a7 : 150 écriture du port,
+  100 abonnement 08090200, 50 abonnement 08090300 ; bit 2 de de64 pour sauter d'étape) continue
+  sans l'écriture ; le saut de la seconde écriture n'explique pas la surdité à lui seul.
+- Trois variables non séparées : le correctif v1.2.14, le client très insistant d'e11, la clé USB.
+  Essai discriminant suivant : e11 tel quel sur la v1.2.13, clé retirée.
+- Entrées 0..71 et 419..511 de l'anneau (séquence de 22:47 elle-même) non lues.
+
+### Surdité reproduite sur la v1.2.13-diag, clé retirée (23:30) : ni le correctif ni la clé
+
+- Journal de 22:47 (v1.2.14) relu après reflash : `08010000 ← 0` puis `← 1` 3 s après, écriture du
+  port acquittée 9 s plus tard, `08040b00 = 2`, seconde passe 3 s après **sans écriture** (abonnement
+  08090200 seul). Le correctif fait ce qui est prévu ; même déroulé au démarrage qui suit le flash,
+  où l'ampli répondait.
+- e11 rejoué tel quel sur la v1.2.13-diag, clé USB retirée : `power-on` 23:30:22, connexion perdue
+  à +29 s, puis connexion acceptée sans réponse. **La surdité vient du client insistant** (requête
+  toutes les 0,5 s, reconnexion toutes les 0,2 s pendant la relance de l'interface), pas de la
+  v1.2.14 ni de la clé. e8 (2 s / 1,5 s) passait sur la v1.2.12.
+- Extinction / allumage à la télécommande (23:34) : toujours sourd. Menu Réseau : sans effet
+  (22:51). Seul un redémarrage du MCU en sort (reflash constaté ; secteur à confirmer).
+- Mécanisme inconnu. Pour le lire : la RAM d'origine est réinitialisée au démarrage, seul le haut
+  de la RAM (anneau 0x2001c000) survit à un reflash ; il faudrait une image diag qui recopie chaque
+  seconde l'état utile (file des requêtes 0x2000a6a8, tampon de réception 0x20009eb0, dff2) vers
+  le haut de la RAM, puis reflasher pour le relire.
+- À faire : valider la v1.2.14 avec Home Assistant comme client ; mécanisme de la surdité.
+
+### v1.2.14-diag avec Home Assistant (2026-11-16 23:56 → 2026-11-17 00:05) : correctif insuffisant
+
+- Tour 1 (allumage HA 23:56, volume manipulé) : tenu. Journal : `08040b00 = 2`, écriture du port
+  **non acquittée** à la même seconde, seconde écriture 2 s après (acquittée), HA reconnecté aussitôt.
+- Tour 2 (allumage 00:02) : volume OK quelques fois puis indisponible, port refusé. Journal :
+  `08010000 ← 0` 00:02:26, `← 1` +3 s, `08040b00 = 2` +13 s, **une seule écriture du port**
+  (acquittée) +15 s, abonnement 08090200, puis rien. Port mort après une seule écriture : la
+  « seconde écriture » n'est pas la cause, l'attente de 20 s est retirée.
+- Port rouvert par le menu Réseau (00:05:59), comme à 22:28.
+
+### Supprimer la reconfiguration à l'allumage : essai par debug-poke (00:10) → v1.2.15-diag
+
+- Pas d'allumage FUN_080481d8 (de9c bit 0) : `e232 != 0` → FUN_0802f088(0), ded4 = 0x177,
+  FUN_08074eac (initialisation), e232 = 1 ; `e232 == 0` → FUN_080478fc, ded4 = 0.
+- Essai (v1.2.14-diag, client à 2 s) : `power-off`, `power-full-off`, `power-on`, puis lecture
+  toutes les 2 à 4 s et remise à zéro de dec8 / decc / ded4 : à +2,2 s decc = 0x313 (remis à 0),
+  à +5,1 s dec8 = 0x2cd (remis à 0), plus rien ensuite ; e232 et df86 restent à 0.
+  **Aucune coupure en 90 s, aucune réponse perdue.**
+- **v1.2.15-diag** (sha256 8d369ad5…1a5f24, non flashée) : `portguard` garde la garde « client
+  connecté » et l'oubli du client à la relance de l'interface ; en plus, marque `0x2001ff10 =
+  "PTOK"` posée quand l'écriture du port est acquittée, effacée par le tick pendant une extinction
+  profonde (armée ou en cours) ; tant qu'elle est posée, le tick 1 s remet dec8 et decc à zéro.
+  Suite 281/281. Le menu Réseau (autre chemin) reste le moyen de rouvrir un port.
+- À vérifier sur matériel : allumage depuis l'éteint avec HA (plus de coupure à +30 s), démarrage
+  à froid, `power-full-off deep` puis allumage (la reconfiguration doit avoir lieu).
+
+### v1.2.15-diag sur matériel (00:25 → 00:36) puis v1.2.16-diag
+
+- Allumage depuis l'éteint, client à 2 s (00:26:38) : 100 s sans coupure ; journal : ni écriture de
+  08010000 ni de 08090100 après l'allumage, seulement `NOTIF 09040300`. Marque = "PTOK".
+- Même scénario avec Home Assistant (00:31) : pas d'indisponible, volume OK, image présente.
+- **Démarrage à froid (secteur 10 s, 00:33) : module absent du réseau** (ni ping ni ARP après
+  3 min). La marque posée sur l'accusé d'écriture du port arrive avant que le module soit sur le
+  réseau, et dec8 / decc servent aussi à finir sa configuration au démarrage.
+- Lecture : le pas d'allumage FUN_080481d8 met lui-même `e2a8 = 1` (0x08048362), `dec8 = 0x32`,
+  `decc = 0` ; FUN_08047a1c (extinction complète) met aussi `e2a8 = 1` (0x08047d9c) et `e232 = 0`.
+  **À chaque allumage depuis l'éteint, l'état « client » est donc faux (1 alors que HA est
+  connecté)** : la garde laisse passer l'écriture du port de la reconfiguration, qui coupe le
+  client et ferme le port. C'est la cause des ports morts de 17:45, 20:33 et 00:02.
+- **v1.2.16-diag** (sha256 c77ac57f…04ddf6) : la marque (nouveau mot "POK2", l'ancien
+  survit au reflash) n'est posée par le tick que lorsque `e2a8 == 0`, c'est-à-dire qu'un client
+  est connecté ; plus de détour du rappel des accusés. Suite 280/280.
+- Vidéo : sortie HDMI perdue deux fois (22:47+, 00:10+), chaque fois après un allumage depuis
+  l'éteint par le réseau avec mes clients de test ; présente à 00:31 avec HA. Non expliqué.
+
+### v1.2.16-diag sur matériel (2026-11-17, 00:50 →)
+
+- Flash seul : module toujours absent du réseau (état incomplet hérité de la v1.2.15 ; le flash
+  ne redémarre pas le module).
+- **Démarrage à froid** (secteur 10 s, télécommande, 00:53) : `get-status` répond 30 s après.
+- **Allumage depuis l'éteint, client à 2 s** (00:54:35) : 100 s sans coupure ; journal : seulement
+  `NOTIF 09040300` à l'allumage ; marque = "POK2".
+- **Allumage depuis l'éteint avec Home Assistant** (00:58) : pas d'indisponible, volume et image OK.
+- **Extinction profonde puis allumage** (`power-full-off deep` 01:00:21, Home Assistant déconnecté) :
+  ping perdu 5 s après ; rallumage télécommande ~01:01:40, `get-status` répond à 01:02:07. Journal :
+  la reconfiguration a bien lieu (`08010000 ← 0`, `← 1` 3 s après, `08040b00 = 2`, écriture du port
+  deux fois à 3 s d'écart, client connecté 2 s plus tard) ; marque "POK2" reposée ensuite.
+- Reste : démarrage à froid avec HA actif, surdité (client insistant), perte de la sortie vidéo,
+  image de publication sans diag.
+- **Démarrage à froid avec Home Assistant actif** (secteur 10 s, télécommande, ~01:08) : HA revient
+  à « allumé » de lui-même, volume OK.
+
+### Image de publication v1.2.0 (préparée le 2026-11-17, non flashée, non publiée)
+
+- `out/AVR1610_patch1_v1.2.0.fw`, sha256 61fa5799…f10650. Features : getstatus, setvolume,
+  bluetooth, keepsleep, push, osdgreen, surround, netoff, mute, sleeptimer, portguard, powerstate.
+- Diffère de la v1.2.16-diag validée sur matériel par : les trois détours du journal, l'aiguillage
+  des commandes (debug-peek / debug-poke en moins), les caves du diagnostic, la chaîne de version
+  et la fin du tick portguard (enchaîne sur le tick veille au lieu de la trace). Tests :
+  test_released_images.py. Suite 284/284.
+- Avant publication : la flasher et refaire au moins allumage depuis l'éteint avec HA et démarrage
+  à froid ; README à mettre à jour (tableau des versions, commande de build, problèmes connus).

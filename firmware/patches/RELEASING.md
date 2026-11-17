@@ -7,7 +7,7 @@ version (`V002.20`). The version is the single source of truth in `build_patch1.
 - **embedded in the firmware** — returned as the 4th field of `get-status`
   (`vol,mute,src,<version>,<pwr>,<sur>,<cat>`), so a flashed amp self-identifies over the network
   (`./ampli.py version`);
-- used to **name the release artifact** (`AVR1610_patch1_v<version>.fw`);
+- used to **name the release artifact** (`AVR1610_custom_fw_v<version>.fw`);
 - used as the **git tag** and **GitHub release** name (`v<version>`).
 
 ## Version scheme (semver)
@@ -23,7 +23,11 @@ were hardware-test builds and were never released.
 in sleep.
 `v1.1.0` = state pushed on change, direct surround-mode selection, green on-screen menu.
 `legacymute` in its feature set keeps the (wrong) mute flag of that image so the tag stays
-reproducible; drop it, and add `mute`, for the next release.
+reproducible.
+`v1.2.0` = the amp stays reachable when fully off (`power-full-off`; `power-full-off deep` for
+the stock power-down), three power states in `get-status` (`1` on, `2` sleep, `0` off), correct
+mute flag, and the control port no longer closes after a power-on. Validated on hardware as
+`v1.2.16-diag` (same image plus the diagnostic commands, which are never released).
 
 Before releasing, run the hardware smoke test on a freshly flashed amp: `./ampli.py version`,
 `./ampli.py status`, a few `./ampli.py set-volume <n>` in both directions, and confirm the
@@ -34,14 +38,14 @@ control port still accepts connections after a cold boot.
 ```bash
 cd firmware/patches
 # 1. bump the version
-#    edit build_patch1.py -> FW_VERSION = "1.1.0"
+#    edit build_patch1.py -> FW_VERSION = "1.2.0"
 
 # 2. build + static tests
 ./.venv/bin/python -m pytest -q
 V=$(./.venv/bin/python -c "import build_patch1 as b; print(b.FW_VERSION)")
 ./.venv/bin/python -c "import patchlib; from build_patch1 import build_patch1, FW_VERSION; \
-  patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth','keepsleep','push','osdgreen','surround','legacymute'}), \
-  f'out/AVR1610_patch1_v{FW_VERSION}.fw')"
+  patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth','keepsleep','push','osdgreen','surround','netoff','mute','sleeptimer','portguard','powerstate'}), \
+  f'out/AVR1610_custom_fw_v{FW_VERSION}.fw')"
 
 # 3. commit, tag, push
 cd ../..
@@ -49,15 +53,15 @@ git add -A && git commit -m "release: firmware v$V"
 git tag "v$V" && git push origin HEAD --tags
 
 # 4. GitHub release with the firmware artifact
-gh release create "v$V" "firmware/patches/out/AVR1610_patch1_v$V.fw" \
+gh release create "v$V" "firmware/patches/out/AVR1610_custom_fw_v$V.fw" \
   --title "Firmware v$V" --notes "…changelog…"
 ```
 
 ## After flashing, verify
 
 ```bash
-./ampli.py version        # -> firmware custom v1.1.0
-./ampli.py status         # -> … | fw 1.1.0
+./ampli.py version        # -> firmware custom v1.2.0
+./ampli.py status         # -> … | fw 1.2.0
 ```
 
 ## Recovery
