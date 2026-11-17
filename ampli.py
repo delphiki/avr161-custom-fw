@@ -9,7 +9,9 @@ Usage :
     ampli.py mute [on|off]         coupe/remet le son ; sans argument = bascule
     ampli.py source <nom>          change de source (ex. TV, Disc, MHL, "Cable Sat",
                                    Bluetooth — direct avec le firmware custom)
-    ampli.py status                alimentation (firmware >= 1.0.5) / volume / mute / source /
+    ampli.py status                alimentation (firmware >= 1.0.5 ; allumé / en veille / éteint
+                                   à partir de 1.2.0, avant « éteint » couvre aussi la veille)
+                                   / volume / mute / source /
                                    version (firmware custom)
     ampli.py set-volume <n|NdB>    volume absolu 0-180 ou en dB (ex. -25db) ; une seule
                                    commande avec le firmware custom >= 1.0.4, sinon
@@ -123,14 +125,18 @@ def surround_code(wanted):
 def parse_status(para):
     """Parse le `para` de get-status ('vol,mute,src[,fw[,pwr[,sur]]]') ->
     dict {vol,mute,source[,fw][,power][,surround,surround_code]} ; power (firmware >= 1.0.5) :
-    True = allumé, False = sleep ; surround : nom du mode (ou son code s'il est inconnu)."""
+    True = allumé ; sleep = True si l'ampli est en veille (firmware >= 1.2.0, qui distingue la
+    veille de l'éteint ; avant, les deux donnent power = False sans clé sleep) ; surround : nom du
+    mode (ou son code s'il est inconnu)."""
     vol, mute, src, fw, pwr, sur, cat = (para.split(",") + [""] * 7)[:7]
     d = {"vol": int(vol), "mute": bool(int(mute)),
          "source": SOURCE_ENUM.get(int(src), str(int(src)))}
     if fw:
         d["fw"] = fw          # version du firmware custom (patch >= v1.0.0)
     if pwr:
-        d["power"] = bool(int(pwr))
+        d["power"] = int(pwr) == 1
+        if int(pwr) == 2:
+            d["sleep"] = True
     if sur:
         d["surround_code"] = int(sur)
         d["surround"] = SURROUND_MODES.get(int(sur), str(int(sur)))
@@ -318,7 +324,8 @@ def main(argv):
             if "fw" in st:
                 line += f" | fw {st['fw']}"
             if "power" in st:
-                line = ("allumé | " if st["power"] else "en sleep | ") + line
+                state = "allumé" if st["power"] else "en veille" if st.get("sleep") else "éteint"
+                line = f"{state} | " + line
             print(line)
         elif cmd == "surround":
             st = amp.get_status()

@@ -104,3 +104,38 @@ def test_push_requires_keepsleep_and_getstatus():
         build_patch1(patchlib.load_stock(), features={"getstatus", "push"})
     with pytest.raises(ValueError):
         build_patch1(patchlib.load_stock(), features={"keepsleep", "push"})
+
+
+# powerstate : veille et éteint sont deux états distincts ; le passage de l'un à l'autre (et
+# l'arrivée du bit « en veille », deux à trois secondes après la sortie de l'état allumé) doit
+# donc être poussé comme un changement.
+@pytest.fixture(scope="module")
+def img3():
+    return build_patch1(patchlib.load_stock(), features=ALL | {"powerstate"}, version=VER)
+
+
+def snap3(asleep, **kw):
+    s = bytearray(snap(power=False, **kw))
+    s[1] |= 4 if asleep else 0
+    return bytes(s)
+
+
+def test_falling_asleep_is_pushed(img3):
+    r = run_tick(img3, power=False, dde0=0x03, push_ram=snap3(asleep=False))
+    assert r["clean"] and r["replies"] == [(b"get-status", b"Main Zone", b"110,0,2,9.9.9,2")]
+
+
+def test_going_from_sleep_to_off_is_pushed(img3):
+    r = run_tick(img3, power=False, dde0=0x01, push_ram=snap3(asleep=True))
+    assert r["clean"] and r["replies"] == [(b"get-status", b"Main Zone", b"110,0,2,9.9.9,0")]
+
+
+@pytest.mark.parametrize("asleep,dde0", [(True, 0x03), (False, 0x01), (True, 0xc3), (False, 0x41)])
+def test_a_steady_sleep_or_off_state_is_not_pushed(img3, asleep, dde0):
+    r = run_tick(img3, power=False, dde0=dde0, push_ram=snap3(asleep=asleep))
+    assert r["clean"] and r["sent"] == 0
+
+
+def test_without_powerstate_the_sleep_bit_is_not_watched(img):
+    r = run_tick(img, power=False, dde0=0x03, push_ram=snap(power=False))
+    assert r["clean"] and r["sent"] == 0
