@@ -6,27 +6,29 @@ command-line tool to drive it over the local network.
 The custom firmware is the stock firmware (V002.20) with a few additions. It is installed
 from a USB stick, like an official update, and the stock firmware can be put back the same way.
 
-> ## ⚠️ Disclaimer — use at your own risk
->
-> This is an unofficial, hobby project. It is **not** affiliated with, endorsed by, or supported
-> by Harman Kardon.
->
+## ⚠️ Disclaimer — use at your own risk
+
+> [!CAUTION]
 > Flashing modified firmware can **permanently damage your receiver** ("brick" it), will most
 > likely **void any warranty**, and may cause it to behave in unexpected ways. It has been
 > tested on **one single unit**. Nothing guarantees it works on yours.
+>
+> If you are not comfortable with the idea of losing the device, do not flash it.
+
+> [!WARNING]
+> This is an unofficial, hobby project. It is **not** affiliated with, endorsed by, or supported
+> by Harman Kardon.
 >
 > Everything here is provided **"as is", without warranty of any kind**. **You alone are
 > responsible** for what you do with it. The author accepts **no liability** for any damage,
 > data loss, malfunction or other consequence resulting from the use of this firmware, these
 > tools or this documentation.
->
-> If you are not comfortable with the idea of losing the device, do not flash it.
 
-> **A note on how this was made:** this project is **100% vibe-coded**. The reverse
-> engineering, the firmware patches, the tools, the tests and this documentation were all
-> produced by an AI coding assistant, steered by the owner and checked against one real
-> receiver. Nobody has reviewed the patched machine code by hand. Read the disclaimer above
-> with that in mind.
+> [!NOTE]
+> **This project is 100% vibe-coded.** The reverse engineering, the firmware patches, the
+> tools, the tests and this documentation were all produced by an AI coding assistant, steered
+> by the owner and checked against one real receiver. Nobody has reviewed the patched machine
+> code by hand. Read the disclaimer above with that in mind.
 
 ---
 
@@ -34,30 +36,32 @@ from a USB stick, like an official update, and the stock firmware can be put bac
 
 Everything the stock firmware does keeps working. The custom firmware adds or changes:
 
-| | Stock firmware | Custom firmware |
+| | 🔵 Stock firmware | 🟢 Custom firmware |
 |---|---|---|
-| **Reading the amp's state** | Not possible over the network | `get-status` returns volume, mute, source, firmware version, power state and surround mode |
-| **State changes** | Never reported | Pushed to the connected client when volume, mute, source, power state or surround mode changes (remote, front panel, HDMI…) |
-| **Volume** | Step up / step down only | `set-volume` jumps straight to a given level |
-| **Bluetooth source** | Cannot be selected over the network | Selected directly |
-| **Surround mode** | The command only cycles to the next mode | Pick a mode directly, or go back to "Auto Select" |
-| **Mute** | `mute-on` and `mute-off` both toggle | They really set the state |
-| **Amp off** | The network module is turned off one hour after going to sleep; only the remote can wake the amp | The network module stays powered: the amp can always be **turned on over the network** |
-| **Power commands** | `power-off` (sleep) | `power-off` (sleep), `power-full-off` (off but reachable), `power-full-off deep` (stock power-down: network off, lowest consumption, remote only to turn back on) |
-| **Power state reported** | — | Three states: on, sleep, off |
-| **On-screen menu** | Blue | Green, so you can tell at a glance that the custom firmware is installed |
+| **Reading the amp's state** | ❌ Not possible over the network | ✅ `get-status` returns volume, mute, source, firmware version, power state and surround mode |
+| **State changes** | ❌ Never reported | ✅ Pushed to the connected client when volume, mute, source, power state or surround mode changes (remote, front panel, HDMI…) |
+| **Volume** | ⚠️ Step up / step down only | ✅ `set-volume` jumps straight to a given level |
+| **Bluetooth source** | ❌ Cannot be selected over the network | ✅ Selected directly |
+| **Surround mode** | ⚠️ The command only cycles to the next mode | ✅ Pick a mode directly, or go back to "Auto Select" |
+| **Mute** | ⚠️ `mute-on` and `mute-off` both toggle | ✅ They really set the state |
+| **Amp off** | ❌ The network module is turned off one hour after going to sleep; only the remote can wake the amp | ✅ The network module stays powered: the amp can always be **turned on over the network** |
+| **Power commands** | ⚠️ `power-off` (sleep) only | ✅ `power-off` (sleep), `power-full-off` (off but reachable), `power-full-off deep` (stock power-down: network off, lowest consumption, remote only to turn back on) |
+| **Power state reported** | ❌ None | ✅ Three states: on, sleep, off |
+| **On-screen menu** | 🔵 Blue | 🟢 Green, so you can tell at a glance that the custom firmware is installed |
+
+❌ not available · ⚠️ limited · ✅ available
 
 Nothing else is modified: the bootloader, the DSP and the other components in the firmware
 file are byte-identical to stock.
 
-### Good to know
-
-- Staying reachable has a cost: the network module stays powered when the amp is off. The
-  extra consumption was not measured. Use `power-full-off deep` if you want the stock behaviour.
-- The amp accepts **one network client at a time**.
-- After plugging the amp back into mains, give it about a minute before it answers on the
-  network.
-- An HDMI-CEC standby order from the TV has not been tested with this version.
+> [!TIP]
+> Good to know:
+> - Staying reachable has a cost: the network module stays powered when the amp is off. The
+>   extra consumption was not measured. Use `power-full-off deep` if you want the stock behaviour.
+> - The amp accepts **one network client at a time**.
+> - After plugging the amp back into mains, give it about a minute before it answers on the
+>   network.
+> - An HDMI-CEC standby order from the TV has not been tested with this version.
 
 ---
 
@@ -66,6 +70,7 @@ file are byte-identical to stock.
 Download the latest `AVR1610_patch1_v<version>.fw` from the
 [releases](../../releases), or build it yourself (see below).
 
+> [!IMPORTANT]
 > **Do not cut the power during the update** (about 10 minutes).
 
 1. Format a USB stick as **FAT32** and make sure it is empty.
