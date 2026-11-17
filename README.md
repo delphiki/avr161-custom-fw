@@ -67,7 +67,7 @@ file are byte-identical to stock.
 
 ## Installing
 
-Download the latest `AVR1610_patch1_v<version>.fw` from the
+Download the latest `AVR1610_custom_fw_v<version>.fw` from the
 [releases](../../releases), or build it yourself (see below).
 
 > [!IMPORTANT]
@@ -87,7 +87,7 @@ On macOS, steps 1–2 look like this:
 
 ```bash
 diskutil eraseDisk FAT32 AVRUPDATE MBRFormat /dev/diskN      # N = your stick!
-cp AVR1610_patch1_v1.2.0.fw "/Volumes/AVRUPDATE/AVR1610_USB(V002_20).fw"
+cp AVR1610_custom_fw_v1.2.0.fw "/Volumes/AVRUPDATE/AVR1610_USB(V002_20).fw"
 diskutil eject /Volumes/AVRUPDATE
 ```
 
@@ -136,7 +136,7 @@ python3 -m venv .venv
 
 ./.venv/bin/python -m pytest -q        # tests (the patched code runs in an emulator)
 ./.venv/bin/python -c "import patchlib; from build_patch1 import build_patch1, FW_VERSION; \
-  patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth','keepsleep','push','osdgreen','surround','netoff','mute','sleeptimer','portguard','powerstate'}), f'out/AVR1610_patch1_v{FW_VERSION}.fw')"
+  patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth','keepsleep','push','osdgreen','surround','netoff','mute','sleeptimer','portguard','powerstate'}), f'out/AVR1610_custom_fw_v{FW_VERSION}.fw')"
 ```
 
 The build is reproducible: it produces the same file, byte for byte, as the release.

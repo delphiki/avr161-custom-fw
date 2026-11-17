@@ -7,7 +7,7 @@ version (`V002.20`). The version is the single source of truth in `build_patch1.
 - **embedded in the firmware** — returned as the 4th field of `get-status`
   (`vol,mute,src,<version>,<pwr>,<sur>,<cat>`), so a flashed amp self-identifies over the network
   (`./ampli.py version`);
-- used to **name the release artifact** (`AVR1610_patch1_v<version>.fw`);
+- used to **name the release artifact** (`AVR1610_custom_fw_v<version>.fw`);
 - used as the **git tag** and **GitHub release** name (`v<version>`).
 
 ## Version scheme (semver)
@@ -45,7 +45,7 @@ cd firmware/patches
 V=$(./.venv/bin/python -c "import build_patch1 as b; print(b.FW_VERSION)")
 ./.venv/bin/python -c "import patchlib; from build_patch1 import build_patch1, FW_VERSION; \
   patchlib.save(build_patch1(patchlib.load_stock(), features={'getstatus','setvolume','bluetooth','keepsleep','push','osdgreen','surround','netoff','mute','sleeptimer','portguard','powerstate'}), \
-  f'out/AVR1610_patch1_v{FW_VERSION}.fw')"
+  f'out/AVR1610_custom_fw_v{FW_VERSION}.fw')"
 
 # 3. commit, tag, push
 cd ../..
@@ -53,7 +53,7 @@ git add -A && git commit -m "release: firmware v$V"
 git tag "v$V" && git push origin HEAD --tags
 
 # 4. GitHub release with the firmware artifact
-gh release create "v$V" "firmware/patches/out/AVR1610_patch1_v$V.fw" \
+gh release create "v$V" "firmware/patches/out/AVR1610_custom_fw_v$V.fw" \
   --title "Firmware v$V" --notes "…changelog…"
 ```
 
