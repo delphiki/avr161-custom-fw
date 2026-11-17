@@ -1,5 +1,7 @@
 # Harman Kardon AVR 161 — custom firmware & network control
 
+[![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-D97757)](https://claude.com/claude-code)
+
 Custom firmware for the **Harman Kardon AVR 161 / AVR 1610** receiver, and a small
 command-line tool to drive it over the local network.
 
