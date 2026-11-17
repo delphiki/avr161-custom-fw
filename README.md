@@ -22,33 +22,30 @@ from a USB stick, like an official update, and the stock firmware can be put bac
 >
 > If you are not comfortable with the idea of losing the device, do not flash it.
 
+> **A note on how this was made:** this project is **100% vibe-coded**. The reverse
+> engineering, the firmware patches, the tools, the tests and this documentation were all
+> produced by an AI coding assistant, steered by the owner and checked against one real
+> receiver. Nobody has reviewed the patched machine code by hand. Read the disclaimer above
+> with that in mind.
+
 ---
 
 ## What the custom firmware changes
 
-Everything the stock firmware does keeps working. The custom firmware adds:
+Everything the stock firmware does keeps working. The custom firmware adds or changes:
 
-- **Read the amp's state over the network** — a `get-status` command returns the volume,
-  mute, source, firmware version, power state and surround mode. The stock firmware has no
-  way to ask the amp what it is doing.
-- **State changes are pushed** — when the volume, mute, source, power state or surround mode
-  changes (remote, front panel, HDMI…), the amp tells the connected client by itself.
-- **Absolute volume** — `set-volume` jumps straight to a given level, instead of stepping up
-  or down.
-- **Direct Bluetooth** — the Bluetooth source can be selected over the network.
-- **Direct surround mode selection** — pick a surround mode, or go back to "Auto Select".
-  The stock command only cycles to the next mode.
-- **Mute on / mute off really set the state.** In the stock firmware both simply toggle.
-- **The amp stays reachable when it is off.** The stock firmware turns the network module off
-  one hour after going to sleep, and after that only the remote can wake the amp. The custom
-  firmware keeps the network module powered, so the amp can always be **turned on over the
-  network**.
-  - `power-off` puts the amp to sleep; `power-full-off` turns it off but keeps it reachable.
-  - `power-full-off deep` is the stock power-down (network off, lowest consumption). Only the
-    remote or the front panel can turn the amp back on from there.
-- **Three power states are reported** — on, sleep, off.
-- **Green on-screen menu** — the menu is green instead of blue, so you can tell at a glance
-  that the custom firmware is installed.
+| | Stock firmware | Custom firmware |
+|---|---|---|
+| **Reading the amp's state** | Not possible over the network | `get-status` returns volume, mute, source, firmware version, power state and surround mode |
+| **State changes** | Never reported | Pushed to the connected client when volume, mute, source, power state or surround mode changes (remote, front panel, HDMI…) |
+| **Volume** | Step up / step down only | `set-volume` jumps straight to a given level |
+| **Bluetooth source** | Cannot be selected over the network | Selected directly |
+| **Surround mode** | The command only cycles to the next mode | Pick a mode directly, or go back to "Auto Select" |
+| **Mute** | `mute-on` and `mute-off` both toggle | They really set the state |
+| **Amp off** | The network module is turned off one hour after going to sleep; only the remote can wake the amp | The network module stays powered: the amp can always be **turned on over the network** |
+| **Power commands** | `power-off` (sleep) | `power-off` (sleep), `power-full-off` (off but reachable), `power-full-off deep` (stock power-down: network off, lowest consumption, remote only to turn back on) |
+| **Power state reported** | — | Three states: on, sleep, off |
+| **On-screen menu** | Blue | Green, so you can tell at a glance that the custom firmware is installed |
 
 Nothing else is modified: the bootloader, the DSP and the other components in the firmware
 file are byte-identical to stock.
